@@ -1,0 +1,16 @@
+[project]
+name = "comfyui-h3-open-writer"
+description = "MiniMax-H3 Ref2VA writer with an external system prompt and a fetched guide (vendored engine)."
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = [
+    "requests",
+    "huggingface_hub",
+]
+
+[project.urls]
+Repository = "https://github.com/yourname/comfyui-h3-open-writer"
+
+[tool.comfy]
+PublisherId = ""
+DisplayName = "MiniMax-H3 Open Writer"
