@@ -12,7 +12,7 @@ from . import catalog, guides
 
 log = logging.getLogger(__name__)
 
-PREFIX = "/minimax_h3_rewriter"
+PREFIX = "/h3_open_writer"
 
 
 def register() -> None:

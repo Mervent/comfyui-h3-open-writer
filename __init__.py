@@ -4,6 +4,7 @@ import logging
 
 from .minimax_h3_rewriter.nodes import NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS
 from .minimax_h3_rewriter import open_node, writer_8b
+from .minimax_h3_rewriter import routes as _routes  # noqa: F401  (registers HTTP routes on import)
 
 log = logging.getLogger(__name__)
 
@@ -25,4 +26,6 @@ except Exception:
         exc_info=True,
     )
 
-__all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]
+WEB_DIRECTORY = "./web/js"
+
+__all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS", "WEB_DIRECTORY"]

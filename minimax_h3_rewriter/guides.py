@@ -37,7 +37,7 @@ GUIDE_TITLES = {
     "ref": "Full-Reference Mode Rewrite Output Format Guide (Ref2VA)",
 }
 
-USER_SUBDIR = "minimax_h3_rewriter"
+USER_SUBDIR = "h3_open_writer"
 GUIDES_DIRNAME = "guides"
 
 MIN_BYTES = 2048
@@ -46,7 +46,7 @@ _TEXT_CACHE: dict[tuple[str, int, int], str] = {}
 
 
 def root() -> str:
-    """Where fetched guides live: ``<ComfyUI user>/minimax_h3_rewriter/guides``."""
+    """Where fetched guides live: ``<ComfyUI user>/h3_open_writer/guides``."""
     try:
         import folder_paths
 
