@@ -1,15 +1,16 @@
 """A creativity pass over a prompt, driven by inline ``<imagine>`` markers.
 
-This node does one narrow thing: it reimagines the spans a user marks and
-leaves everything else untouched. A span is written inline in the prompt as::
+This node does one narrow thing: it replaces the spans a user marks with a
+variation on their theme and leaves everything else untouched. A span is written
+inline in the prompt as::
 
     <imagine str=3>a quiet street</imagine>
 
-and the model rewrites only the text inside it, splicing the result back in
-wrapped in ``*asterisks*`` so it is obvious what changed. ``str`` is the
-imagination strength for that one span, from 0 (barely touch it) to 9 (the most
-imaginative reading the words can bear); a span written as a bare ``<imagine>``
-uses the node's ``imagination`` default instead.
+and the model rewrites only the text inside it, splicing the variation back in
+wrapped in ``*asterisks*`` so it is obvious what changed. ``str`` sets how far
+that span's variation may stray from the original, from 0 (the same line,
+reworded) to 9 (a wild variation that may invert its meaning); a span written as
+a bare ``<imagine>`` uses the node's ``imagination`` default instead.
 
 It is a pre-processor, not a writer: one ``creative_prompt`` string comes out,
 which you then feed into any of the MiniMax-H3 writer nodes. The whole prompt
@@ -47,42 +48,49 @@ IMAGINE_RE = re.compile(
 LEVEL_MIN = 0
 LEVEL_MAX = 9
 
-DEFAULT_SYSTEM_PROMPT = """You are a creative prompt embellisher. You receive a prompt that may contain
+DEFAULT_SYSTEM_PROMPT = """You are a creative variation generator. You receive a prompt that may contain
 one or more marked spans written as:
 
     <imagine str=N>TEXT</imagine>
 
-Your only job is to reimagine the TEXT inside each such span more vividly and
-creatively, and to leave every character outside the spans exactly as it is.
+Your only job is to replace the TEXT inside each such span with a variation on
+its theme, and to leave every character outside the spans exactly as it is.
 
 Rules:
 - Rewrite only the text inside <imagine>...</imagine>. Never change, reorder,
   add, or drop anything outside a span.
-- Replace each whole span, tags included, with your reimagined text wrapped in
-  single asterisks, like *this*. The <imagine> and </imagine> tags must never
-  appear in your output.
-- str=N is the imagination strength for that span, from 0 to 9. A span written
-  without str= uses the default level of {level}.
-- Keep the reimagined text grammatically consistent with the surrounding words,
-  so the sentence still reads naturally once the span is replaced.
+- Replace each whole span, tags included, with your variation wrapped in single
+  asterisks, like *this*. The <imagine> and </imagine> tags must never appear in
+  your output.
+- str=N sets how far the variation may stray from the original, from 0 to 9. A
+  span written without str= uses the default level of {level}.
+- A variation is a fresh take on the same span, not a decorated copy of it: give
+  a different phrasing, angle, or intent rather than the original with extra
+  adjectives.
+- Keep the variation grammatically consistent with the surrounding words, so the
+  sentence still reads naturally once the span is replaced.
 - Do not answer, explain, comment, or add headings. Return only the rewritten
   prompt.
 
-Imagination-strength scale:
-  0    leave it essentially as written; touch only obvious wording
-  1-2  light polish: a stronger adjective or two, same meaning
-  3-4  vivid: concrete sensory detail and richer verbs, still literal
-  5-6  inventive: add mood, texture, and unexpected but fitting imagery
-  7-8  bold: surprising metaphors and striking, cinematic detail
-  9    surreal: the most imaginative reading the words can bear, while still
-       describing the same subject"""
+Divergence scale (how far the variation strays from the original):
+  0    the same line, trivially reworded
+  1-2  a close paraphrase: same meaning and tone, different words
+       (e.g. "Hello, my friend!" -> "Hi, dear.")
+  3-4  a clear variation: same situation, shifted wording, a mild change of
+       angle or mood
+  5-6  a loose riff: keep a thread to the original but reinterpret it freely;
+       the mood or intent may flip
+  7-8  a bold reimagining: a surprising, tangential take whose meaning departs
+       sharply from the original
+  9    a wild, unrestrained variation: take the line somewhere unexpected, even
+       its opposite (e.g. "Hello, my friend" -> "Prepare to die, bastard.")"""
 
 EXAMPLE_PROMPT = (
     "A woman walks down <imagine str=3>a quiet street</imagine> at night, "
     "and the camera lingers on <imagine str=8>her face</imagine>."
 )
 
-LEVEL_LINE = "\n\nSpans written without str= use the default imagination level of {level}."
+LEVEL_LINE = "\n\nSpans written without str= use the default divergence level of {level}."
 
 
 def _compose_system(system_prompt: str, level: int) -> str:
@@ -143,11 +151,12 @@ class MiniMaxH3CreativeImaginer:
     """Reimagine the ``<imagine>``-marked spans of a prompt, leaving the rest alone."""
 
     DESCRIPTION = (
-        "A creativity pass over a prompt. Mark the parts to reimagine inline as "
-        "<imagine str=N>...</imagine> — str is that span's imagination strength from 0 to 9 — "
-        "and the model rewrites only those spans, splicing each back in wrapped in *asterisks*. "
-        "A bare <imagine> uses the node's 'imagination' default. One creative_prompt comes out, "
-        "ready to feed into any MiniMax-H3 writer. Runs on any instruction-following GGUF."
+        "A variation pass over a prompt. Mark the parts to reimagine inline as "
+        "<imagine str=N>...</imagine> — str sets how far that span's variation strays from the "
+        "original, 0 to 9 — and the model replaces only those spans with a variation on their "
+        "theme, wrapped in *asterisks*. A bare <imagine> uses the node's 'imagination' default. "
+        "One creative_prompt comes out, ready to feed into any MiniMax-H3 writer. Runs on any "
+        "instruction-following GGUF."
     )
 
     @classmethod
@@ -160,7 +169,7 @@ class MiniMaxH3CreativeImaginer:
                         "multiline": True,
                         "default": EXAMPLE_PROMPT,
                         "tooltip": (
-                            "The prompt to embellish. Wrap the parts to reimagine in "
+                            "The prompt to vary. Wrap the parts to reimagine in "
                             "<imagine str=N>...</imagine>; text outside the tags is kept as is. "
                             "With no tags the prompt is returned unchanged and no model is loaded."
                         ),
@@ -174,9 +183,9 @@ class MiniMaxH3CreativeImaginer:
                         "max": LEVEL_MAX,
                         "step": 1,
                         "tooltip": (
-                            "Default imagination strength (0-9) for any <imagine> tag written "
-                            "without its own str=. Also substituted for {level} in the system "
-                            "prompt. 9 is the most imaginative."
+                            "Default divergence (0-9) for any <imagine> tag written without its "
+                            "own str=. Also substituted for {level} in the system prompt. 0 is a "
+                            "close paraphrase; 9 strays furthest, up to the opposite meaning."
                         ),
                     },
                 ),
