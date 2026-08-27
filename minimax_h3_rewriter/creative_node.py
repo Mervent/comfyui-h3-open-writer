@@ -1,22 +1,16 @@
-"""A creativity pass over a prompt, driven by inline ``<imagine>`` markers.
+"""A creativity pass over a prompt, driven by inline tags.
 
-This node does one narrow thing: it replaces the spans a user marks with a
-variation on their theme and leaves everything else untouched. A span is written
-inline in the prompt as::
+The user marks spans in the prompt and the model rewrites the whole prompt in a
+single pass, changing only those spans and copying everything else verbatim. Two
+kinds of span are understood::
 
-    <imagine str=3>a quiet street</imagine>
+    <imagine str=3>a quiet street</imagine>        -> a variation on that text
+    <write str=7>describe what she does next</write> -> text written to that brief
 
-and the model rewrites only the text inside it, splicing the variation back in
-wrapped in ``*asterisks*`` so it is obvious what changed. ``str`` sets how far
-that span's variation may stray from the original, from 0 (the same line,
-reworded) to 9 (a wild variation that may invert its meaning); a span written as
-a bare ``<imagine>`` uses the node's ``imagination`` default instead.
-
-It is a pre-processor, not a writer: one ``creative_prompt`` string comes out,
-which you then feed into any of the MiniMax-H3 writer nodes. The whole prompt
-goes through the model in a single pass, exactly as the guided writers work --
-system prompt explaining the contract, user prompt carrying the tagged text --
-so there is no per-span round trip and the sentences keep their context.
+``str`` is a 0-9 level: for ``<imagine>`` it is how far the variation may stray
+from the original, for ``<write>`` how freely the instruction is interpreted; a
+bare tag uses the node's ``imagination`` default. One ``creative_prompt`` comes
+out, ready to feed into any of the MiniMax-H3 writer nodes.
 """
 
 from __future__ import annotations
@@ -40,66 +34,70 @@ from .progress import NodeProgress
 
 log = logging.getLogger(__name__)
 
-IMAGINE_RE = re.compile(
-    r"<imagine(?:\s+str=(\d+))?\s*>(.*?)</imagine>",
+TAG_RE = re.compile(
+    r"<(?P<kind>imagine|write)(?:\s+str=(?P<str>\d+))?\s*>(?P<body>.*?)</(?P=kind)>",
     re.DOTALL | re.IGNORECASE,
 )
 
 LEVEL_MIN = 0
 LEVEL_MAX = 9
 
-DEFAULT_SYSTEM_PROMPT = """You are a creative variation generator. You receive a prompt that may contain
-one or more marked spans written as:
+DEFAULT_SYSTEM_PROMPT = """You are given a prompt that contains marked spans. Return the ENTIRE prompt
+back, changing only the marked spans and copying every character outside them
+exactly as it is -- verbatim, in the same order. Do not answer or react to the
+prompt; only rewrite it.
 
-    <imagine str=N>TEXT</imagine>
+There are two kinds of span:
 
-Your only job is to replace the TEXT inside each such span with a variation on
-its theme, and to leave every character outside the spans exactly as it is.
+  <imagine str=N>TEXT</imagine>
+      Replace the whole span with a variation on TEXT -- a fresh take, not a
+      decorated copy: change the phrasing, angle, or intent rather than adding
+      adjectives. N (0-9) is how far the variation may stray from TEXT.
+
+  <write str=N>INSTRUCTION</write>
+      INSTRUCTION describes what to write at this spot. Replace the whole span
+      with text that carries it out. If it offers options to choose from, pick
+      one and write it out; never list the options or say that you chose. N
+      (0-9) is how freely you interpret the instruction.
+
+A span written without str= uses the default level of {level}.
 
 Rules:
-- Rewrite only the text inside <imagine>...</imagine>. Never change, reorder,
-  add, or drop anything outside a span.
-- Replace each whole span, tags included, with your variation wrapped in single
-  asterisks, like *this*. The <imagine> and </imagine> tags must never appear in
-  your output.
-- str=N sets how far the variation may stray from the original, from 0 to 9. A
-  span written without str= uses the default level of {level}.
-- A variation is a fresh take on the same span, not a decorated copy of it: give
-  a different phrasing, angle, or intent rather than the original with extra
-  adjectives.
-- Keep the variation grammatically consistent with the surrounding words, so the
-  sentence still reads naturally once the span is replaced.
-- Do not answer, explain, comment, or add headings. Return only the rewritten
-  prompt.
+- Return the complete prompt. Copy everything outside the spans exactly: do not
+  add, drop, reorder, or reword any of it.
+- Replace each span inline with your result and remove the <imagine>/<write>
+  tags. Do not wrap a result in quotation marks, asterisks, or labels.
+- Wrap any direct speech in your result inside <d> and </d>, like
+  <d>some words</d> -- the exact words a character says aloud, never narration.
+- Fit each replacement to the words around it so the sentence still reads.
+- Keep the language of the surrounding text -- and, for <write>, of the
+  instruction -- unless told otherwise.
+- Output only the rewritten prompt: no commentary, no headings, no notes.
 
-Divergence scale (how far the variation strays from the original):
-  0    the same line, trivially reworded
-  1-2  a close paraphrase: same meaning and tone, different words
-       (e.g. "Hello, my friend!" -> "Hi, dear.")
-  3-4  a clear variation: same situation, shifted wording, a mild change of
-       angle or mood
-  5-6  a loose riff: keep a thread to the original but reinterpret it freely;
-       the mood or intent may flip
-  7-8  a bold reimagining: a surprising, tangential take whose meaning departs
-       sharply from the original
-  9    a wild, unrestrained variation: take the line somewhere unexpected, even
-       its opposite (e.g. "Hello, my friend" -> "Prepare to die, bastard.")"""
+Level scale (str=N), for both tags:
+  0    minimal: <imagine> barely strays; <write> is plain and literal
+  1-2  a light touch, close to the source
+  3-4  a clear, vivid change, still recognisably related
+  5-6  inventive: reinterpret freely, the mood or angle may shift
+  7-8  bold: a surprising take whose meaning departs sharply
+  9    wild: the most unexpected reading, even the opposite
+       (e.g. <imagine> "Hello, my friend" -> "Prepare to die, bastard.")"""
 
 EXAMPLE_PROMPT = (
-    "A woman walks down <imagine str=3>a quiet street</imagine> at night, "
-    "and the camera lingers on <imagine str=8>her face</imagine>."
+    "A woman walks down <imagine str=3>a quiet street</imagine> at night. "
+    "<write str=7>Describe what she does when she stops, in one sentence.</write>"
 )
 
-LEVEL_LINE = "\n\nSpans written without str= use the default divergence level of {level}."
+LEVEL_LINE = "\n\nSpans written without str= use the default level of {level}."
 
 
 def _compose_system(system_prompt: str, level: int) -> str:
     """Fill the default level into the system prompt the user supplied.
 
-    ``{level}`` is where the imagination default belongs, so it is substituted
-    there when present. A system prompt that never mentions it -- one the user
-    rewrote from scratch -- gets the default stated in one appended line rather
-    than silently, so a bare ``<imagine>`` still has a defined strength.
+    ``{level}`` is where the default belongs, so it is substituted there when
+    present. A system prompt that never mentions it -- one the user rewrote from
+    scratch -- gets the default stated in one appended line rather than silently,
+    so a bare tag still has a defined level.
     """
     system_prompt = (system_prompt or "").strip()
     if "{level}" in system_prompt:
@@ -111,7 +109,7 @@ def _outside_segments(prompt: str) -> list[str]:
     """The literal text between the tags -- everything that must survive verbatim."""
     segments: list[str] = []
     last = 0
-    for match in IMAGINE_RE.finditer(prompt):
+    for match in TAG_RE.finditer(prompt):
         segments.append(prompt[last : match.start()])
         last = match.end()
     segments.append(prompt[last:])
@@ -121,7 +119,7 @@ def _outside_segments(prompt: str) -> list[str]:
 def _preservation_note(prompt: str, output: str) -> str:
     """Warn -- without failing -- when the model dropped the untouched text.
 
-    A single-pass rewrite trusts the model to copy everything outside the spans
+    A whole-prompt rewrite trusts the model to copy everything outside the spans
     byte for byte, and a small one sometimes paraphrases it instead. The literal
     segments long enough to be distinctive are checked against the output; if
     several have gone missing, the run still returns, but the node says the text
@@ -136,27 +134,26 @@ def _preservation_note(prompt: str, output: str) -> str:
         return ""
     log.warning(
         "[minimax_h3_rewriter.creative_node] %d/%d literal segments missing from the "
-        "rewrite; the model may have altered text outside the <imagine> spans",
+        "rewrite; the model may have altered text outside the marked spans",
         len(missing),
         len(anchors),
     )
     return (
         f"⚠ {len(missing)} of {len(anchors)} untouched segment(s) are not in the output — "
-        f"the model may have changed text outside the <imagine> spans. Lower the temperature "
+        f"the model may have changed text outside the marked spans. Lower the temperature "
         f"or try a larger model.\n\n"
     )
 
 
 class MiniMaxH3CreativeImaginer:
-    """Reimagine the ``<imagine>``-marked spans of a prompt, leaving the rest alone."""
+    """Rewrite the ``<imagine>``/``<write>`` spans of a prompt, copying the rest verbatim."""
 
     DESCRIPTION = (
-        "A variation pass over a prompt. Mark the parts to reimagine inline as "
-        "<imagine str=N>...</imagine> — str sets how far that span's variation strays from the "
-        "original, 0 to 9 — and the model replaces only those spans with a variation on their "
-        "theme, wrapped in *asterisks*. A bare <imagine> uses the node's 'imagination' default. "
-        "One creative_prompt comes out, ready to feed into any MiniMax-H3 writer. Runs on any "
-        "instruction-following GGUF."
+        "A creativity pass over a prompt. Mark spans inline as <imagine str=N>...</imagine> "
+        "(a variation on that text) or <write str=N>...</write> (text written to that "
+        "instruction); str is a 0-9 level. The model returns the whole prompt with only those "
+        "spans changed and everything else kept verbatim. A bare tag uses the node's "
+        "'imagination' default. One creative_prompt comes out, ready for any MiniMax-H3 writer."
     )
 
     @classmethod
@@ -169,9 +166,10 @@ class MiniMaxH3CreativeImaginer:
                         "multiline": True,
                         "default": EXAMPLE_PROMPT,
                         "tooltip": (
-                            "The prompt to vary. Wrap the parts to reimagine in "
-                            "<imagine str=N>...</imagine>; text outside the tags is kept as is. "
-                            "With no tags the prompt is returned unchanged and no model is loaded."
+                            "The prompt to rework. Mark spans as <imagine str=N>...</imagine> "
+                            "(vary that text) or <write str=N>...</write> (write to that "
+                            "instruction); everything else is kept verbatim. With no tags the "
+                            "prompt is returned unchanged and no model is loaded."
                         ),
                     },
                 ),
@@ -183,9 +181,9 @@ class MiniMaxH3CreativeImaginer:
                         "max": LEVEL_MAX,
                         "step": 1,
                         "tooltip": (
-                            "Default divergence (0-9) for any <imagine> tag written without its "
-                            "own str=. Also substituted for {level} in the system prompt. 0 is a "
-                            "close paraphrase; 9 strays furthest, up to the opposite meaning."
+                            "Default level (0-9) for any <imagine> or <write> tag written without "
+                            "its own str=. Also substituted for {level} in the system prompt. For "
+                            "<imagine>, 9 strays furthest; for <write>, 9 is the freest reading."
                         ),
                     },
                 ),
@@ -196,8 +194,7 @@ class MiniMaxH3CreativeImaginer:
                         "default": DEFAULT_SYSTEM_PROMPT,
                         "tooltip": (
                             "The whole system message. Use {level} to mark where the default "
-                            "imagination strength goes; without it the default is stated in an "
-                            "appended line."
+                            "level goes; without it the default is stated in an appended line."
                         ),
                     },
                 ),
@@ -216,7 +213,7 @@ class MiniMaxH3CreativeImaginer:
                         "default": True,
                         "tooltip": (
                             "Deterministic decoding, which keeps the untouched text intact. Turn "
-                            "off (and randomise the seed) for more variation in the reimaginings."
+                            "off (and randomise the seed) for more surprise in the changes."
                         ),
                     },
                 ),
@@ -267,12 +264,12 @@ class MiniMaxH3CreativeImaginer:
 
         progress = NodeProgress(unique_id)
 
-        if not IMAGINE_RE.search(prompt):
+        if not TAG_RE.search(prompt):
             log.info(
-                "[minimax_h3_rewriter.creative_node] no <imagine> spans; returning the prompt "
-                "unchanged without loading a model"
+                "[minimax_h3_rewriter.creative_node] no <imagine>/<write> tags; returning the "
+                "prompt unchanged without loading a model"
             )
-            progress.finish("no <imagine> spans — prompt returned unchanged")
+            progress.finish("no tags — prompt returned unchanged")
             return (prompt.strip(),)
 
         level = max(LEVEL_MIN, min(LEVEL_MAX, int(imagination)))
