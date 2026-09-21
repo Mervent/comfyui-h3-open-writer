@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 
-from . import catalog, guides
+from . import cache, catalog, guides
 
 log = logging.getLogger(__name__)
 
@@ -38,6 +38,17 @@ def register() -> None:
             log.error("[minimax_h3_rewriter.routes] could not open the guide folder: %s", error)
             return web.json_response(
                 {"ok": False, "error": str(error), "path": guides.root()}, status=500
+            )
+        return web.json_response({"ok": True, "path": path})
+
+    @routes.post(f"{PREFIX}/open_cache_folder")
+    async def open_cache_folder(request):
+        try:
+            path = cache.reveal()
+        except Exception as error:
+            log.error("[minimax_h3_rewriter.routes] could not open the cache folder: %s", error)
+            return web.json_response(
+                {"ok": False, "error": str(error), "path": cache.root()}, status=500
             )
         return web.json_response({"ok": True, "path": path})
 

@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import logging
 
-from . import discovery, guide_prompt, guides
+from . import cache, discovery, guide_prompt, guides
 from .constants import DURATION_MAX, DURATION_MIN, REF_OUTPUT_FIELDS, RESOLUTIONS
 from .fields import split_sections
 from .nodes import (
@@ -174,6 +174,18 @@ class MiniMaxH3OpenWriterRef:
                         "tooltip": "Deterministic decoding. Turn off (and randomize seed) for variation.",
                     },
                 ),
+                "use_cache": (
+                    "BOOLEAN",
+                    {
+                        "default": True,
+                        "tooltip": (
+                            "Reuse a stored rewrite when the prompt, reference, model and every "
+                            "setting are unchanged, instead of running the model again. Turn off to "
+                            "always regenerate. The 'Open cache folder' button shows where the "
+                            "rewrites are kept."
+                        ),
+                    },
+                ),
                 "seed": (
                     "INT",
                     {
@@ -221,6 +233,7 @@ class MiniMaxH3OpenWriterRef:
         greedy,
         seed,
         keep_model_loaded,
+        use_cache=True,
         reference_assets="",
         options=None,
         unique_id=None,
@@ -244,6 +257,32 @@ class MiniMaxH3OpenWriterRef:
             {"role": "system", "content": system_content},
             {"role": "user", "content": user_content},
         ]
+
+        gen_params = {
+            "model": model,
+            "greedy": bool(greedy),
+            "seed": int(seed),
+            "max_new_tokens": int(settings["max_new_tokens"]),
+            "temperature": float(settings["temperature"]),
+            "top_p": float(settings["top_p"]),
+            "top_k": int(settings["top_k"]),
+            "repetition_penalty": float(settings["repetition_penalty"]),
+        }
+        cache_key = cache.key(messages, gen_params) if use_cache else ""
+
+        if cache_key:
+            cached = cache.load(cache_key)
+            if cached is not None:
+                _head, sections = split_sections(
+                    cached, REF_OUTPUT_FIELDS, fallback="detailed_description"
+                )
+                progress.text(
+                    "Reused a cached rewrite; the model was not run.\n\n"
+                    + (cached[-2000:] if cached else "(empty rewrite)"),
+                    force=True,
+                )
+                log.info("[minimax_h3_rewriter.open_node] cache hit %s", cache_key)
+                return (cached,) + tuple(sections[name] for name in REF_OUTPUT_FIELDS)
 
         choice = _resolve_writer_choice(model)
         if choice.local:
@@ -289,6 +328,22 @@ class MiniMaxH3OpenWriterRef:
 
         _head, sections = split_sections(text, REF_OUTPUT_FIELDS, fallback="detailed_description")
         _report(progress, text, sections, REF_OUTPUT_FIELDS)
+
+        if cache_key:
+            cache.store(
+                cache_key,
+                text=text,
+                meta={
+                    "model": model,
+                    "guide": guide,
+                    "resolution": resolution,
+                    "duration": int(duration),
+                    "greedy": bool(greedy),
+                    "seed": int(seed),
+                    "prompt_preview": (prompt or "").strip()[:200],
+                },
+            )
+
         return (text,) + tuple(sections[name] for name in REF_OUTPUT_FIELDS)
 
 
