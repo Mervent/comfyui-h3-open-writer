@@ -38,6 +38,7 @@ log = logging.getLogger(__name__)
 
 THINK_BLOCK_RE = re.compile(r"(?is)<think\b[^>]*>(?P<body>.*?)</think\s*>")
 THINK_OPEN_TAG_RE = re.compile(r"(?is)<think\b[^>]*>")
+THINK_CLOSE_RE = re.compile(r"(?is)</think\s*>")
 
 DEFAULT_SYSTEM_PROMPT = """You are a creative fiction writer. Read the user's idea and write one short,
 self-contained story based on it.
@@ -52,27 +53,34 @@ EFFORT_CHOICES = ["default", "low", "medium", "high", "xhigh"]
 
 
 def _split_think(text: str) -> tuple[str, str]:
-    """Pull every ``<think>...</think>`` block out, returning (story, thinking).
+    """Separate reasoning from story, returning (story, thinking).
 
-    All reasoning blocks anywhere in the output are removed and their bodies
-    joined into the thinking text; whatever is left is the story. This tolerates
-    more than one block and blocks that do not sit at the very start, which a
-    single leading-anchored match missed. A trailing ``<think>`` with no closing
-    tag means the reasoning was cut off by ``max_new_tokens``: its tail becomes
-    thinking and the story is what precedes it. Tag case, attributes, and
-    whitespace in the closing tag are ignored.
+    The split keys off the closing ``</think>``, not a matching pair: Qwen-style
+    templates pre-inject the opening ``<think>`` into the prompt, so the model's
+    output usually carries only the closing tag. Everything before the first
+    ``</think>`` (minus a stray leading ``<think>``) is reasoning and the rest is
+    the story. Fully paired blocks anywhere are pulled out first, and a lone
+    unclosed ``<think>`` is treated as reasoning truncated by ``max_new_tokens``.
+    Surrounding newlines are dropped; tag case, attributes, and whitespace inside
+    the closing tag are ignored.
     """
     text = text or ""
     thoughts = [match.group("body").strip() for match in THINK_BLOCK_RE.finditer(text)]
     story = THINK_BLOCK_RE.sub("", text)
-    opened = THINK_OPEN_TAG_RE.search(story)
-    if opened:
-        log.warning(
-            "[minimax_h3_rewriter.story_node] a reasoning block was never closed; the story "
-            "was probably cut off by max_new_tokens"
-        )
-        thoughts.append(story[opened.end() :].strip())
-        story = story[: opened.start()]
+    close = THINK_CLOSE_RE.search(story)
+    if close:
+        head = THINK_OPEN_TAG_RE.sub("", story[: close.start()], count=1)
+        thoughts.append(head.strip())
+        story = story[close.end() :]
+    else:
+        opened = THINK_OPEN_TAG_RE.search(story)
+        if opened:
+            log.warning(
+                "[minimax_h3_rewriter.story_node] a reasoning block was never closed; the story "
+                "was probably cut off by max_new_tokens"
+            )
+            thoughts.append(story[opened.end() :].strip())
+            story = story[: opened.start()]
     thinking = "\n\n".join(thought for thought in thoughts if thought).strip()
     return story.strip(), thinking
 
