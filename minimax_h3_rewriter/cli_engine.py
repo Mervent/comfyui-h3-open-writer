@@ -71,8 +71,12 @@ def gguf_metadata(model_path: str) -> dict:
     return metadata
 
 
-def render_prompt(model_path: str, messages: list[dict[str, str]]) -> str:
-    return chat_template.from_metadata(gguf_metadata(model_path), messages, enable_thinking=False)
+def render_prompt(
+    model_path: str, messages: list[dict[str, str]], enable_thinking: bool = False
+) -> str:
+    return chat_template.from_metadata(
+        gguf_metadata(model_path), messages, enable_thinking=enable_thinking
+    )
 
 
 def build_command(
@@ -136,11 +140,12 @@ def generate(
     top_p: float,
     top_k: int,
     repetition_penalty: float,
+    enable_thinking: bool = False,
     device: str = devices.AUTO,
     progress: NodeProgress | None = None,
 ) -> str:
     device = devices.validate(device)
-    rendered = render_prompt(model_path, messages)
+    rendered = render_prompt(model_path, messages, enable_thinking=enable_thinking)
 
     handle, prompt_file = tempfile.mkstemp(prefix="minimax_h3_", suffix=".txt")
     with os.fdopen(handle, "w", encoding="utf-8", newline="\n") as file:

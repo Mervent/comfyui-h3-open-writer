@@ -19,6 +19,11 @@ from .minimax_h3_rewriter import creative_node
 NODE_CLASS_MAPPINGS.update(creative_node.NODE_CLASS_MAPPINGS)
 NODE_DISPLAY_NAME_MAPPINGS.update(creative_node.NODE_DISPLAY_NAME_MAPPINGS)
 
+from .minimax_h3_rewriter import story_node
+
+NODE_CLASS_MAPPINGS.update(story_node.NODE_CLASS_MAPPINGS)
+NODE_DISPLAY_NAME_MAPPINGS.update(story_node.NODE_DISPLAY_NAME_MAPPINGS)
+
 try:
     from .minimax_h3_rewriter import multi_caption
 
