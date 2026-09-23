@@ -36,8 +36,8 @@ from .progress import NodeProgress
 
 log = logging.getLogger(__name__)
 
-THINK_BLOCK_RE = re.compile(r"(?is)^\s*<think\b[^>]*>(?P<body>.*?)</think\s*>\s*")
-THINK_OPEN_TAG_RE = re.compile(r"(?is)^\s*<think\b[^>]*>")
+THINK_BLOCK_RE = re.compile(r"(?is)<think\b[^>]*>(?P<body>.*?)</think\s*>")
+THINK_OPEN_TAG_RE = re.compile(r"(?is)<think\b[^>]*>")
 
 DEFAULT_SYSTEM_PROMPT = """You are a creative fiction writer. Read the user's idea and write one short,
 self-contained story based on it.
@@ -50,28 +50,29 @@ EXAMPLE_PROMPT = "A lighthouse keeper discovers that the light has started answe
 
 
 def _split_think(text: str) -> tuple[str, str]:
-    """Split a leading ``<think>...</think>`` block off, returning (story, thinking).
+    """Pull every ``<think>...</think>`` block out, returning (story, thinking).
 
-    The regex matches one opening ``<think>`` (with any attributes and any case)
-    through its matching ``</think>`` at the very start of the output, so tag
-    casing and stray whitespace no longer defeat the split; the captured body is
-    the reasoning and the remainder is the story. When ``<think>`` opens but
-    never closes, the reasoning ran past ``max_new_tokens`` and no story
-    followed, so the whole tail is returned as thinking with an empty story; the
-    caller reports that case. Output without a ``<think>`` is all story.
+    All reasoning blocks anywhere in the output are removed and their bodies
+    joined into the thinking text; whatever is left is the story. This tolerates
+    more than one block and blocks that do not sit at the very start, which a
+    single leading-anchored match missed. A trailing ``<think>`` with no closing
+    tag means the reasoning was cut off by ``max_new_tokens``: its tail becomes
+    thinking and the story is what precedes it. Tag case, attributes, and
+    whitespace in the closing tag are ignored.
     """
     text = text or ""
-    closed = THINK_BLOCK_RE.match(text)
-    if closed:
-        return text[closed.end() :].strip(), closed.group("body").strip()
-    opened = THINK_OPEN_TAG_RE.match(text)
+    thoughts = [match.group("body").strip() for match in THINK_BLOCK_RE.finditer(text)]
+    story = THINK_BLOCK_RE.sub("", text)
+    opened = THINK_OPEN_TAG_RE.search(story)
     if opened:
         log.warning(
-            "[minimax_h3_rewriter.story_node] the reasoning block was never closed; the story "
+            "[minimax_h3_rewriter.story_node] a reasoning block was never closed; the story "
             "was probably cut off by max_new_tokens"
         )
-        return "", text[opened.end() :].strip()
-    return text.strip(), ""
+        thoughts.append(story[opened.end() :].strip())
+        story = story[: opened.start()]
+    thinking = "\n\n".join(thought for thought in thoughts if thought).strip()
+    return story.strip(), thinking
 
 
 class MiniMaxH3StoryWriter:
@@ -156,8 +157,8 @@ class MiniMaxH3StoryWriter:
             "hidden": {"unique_id": "UNIQUE_ID"},
         }
 
-    RETURN_TYPES = ("STRING", "STRING")
-    RETURN_NAMES = ("story", "thinking")
+    RETURN_TYPES = ("STRING", "STRING", "STRING")
+    RETURN_NAMES = ("story", "thinking", "raw")
     FUNCTION = "write"
     CATEGORY = CATEGORY
 
@@ -239,7 +240,7 @@ class MiniMaxH3StoryWriter:
             )
         else:
             progress.text(story[-2000:] if story else "(empty story)", force=True)
-        return (story, thinking)
+        return (story, thinking, raw)
 
 
 NODE_CLASS_MAPPINGS = {"MiniMaxH3StoryWriter": MiniMaxH3StoryWriter}
