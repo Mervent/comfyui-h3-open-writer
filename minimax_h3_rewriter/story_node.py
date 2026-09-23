@@ -36,8 +36,8 @@ from .progress import NodeProgress
 
 log = logging.getLogger(__name__)
 
-THINK_BLOCK_RE = re.compile(r"(?is)^\s*<think\b[^>]*>.*?</think\s*>\s*")
-THINK_OPEN_RE = re.compile(r"(?is)^\s*<think\b")
+THINK_BLOCK_RE = re.compile(r"(?is)^\s*<think\b[^>]*>(?P<body>.*?)</think\s*>\s*")
+THINK_OPEN_TAG_RE = re.compile(r"(?is)^\s*<think\b[^>]*>")
 
 DEFAULT_SYSTEM_PROMPT = """You are a creative fiction writer. Read the user's idea and write one short,
 self-contained story based on it.
@@ -49,27 +49,29 @@ and do not restate the idea. Match the language of the user's idea."""
 EXAMPLE_PROMPT = "A lighthouse keeper discovers that the light has started answering back."
 
 
-def _strip_think(text: str) -> str:
-    """Drop a leading ``<think>...</think>`` reasoning block, keep the story.
+def _split_think(text: str) -> tuple[str, str]:
+    """Split a leading ``<think>...</think>`` block off, returning (story, thinking).
 
     The regex matches one opening ``<think>`` (with any attributes and any case)
     through its matching ``</think>`` at the very start of the output, so tag
-    casing and stray whitespace no longer defeat the strip. When ``<think>``
-    opens but never closes, the reasoning ran past ``max_new_tokens`` and no
-    story followed, so the empty string is returned rather than a dump of the
-    unclosed reasoning; the caller reports that case.
+    casing and stray whitespace no longer defeat the split; the captured body is
+    the reasoning and the remainder is the story. When ``<think>`` opens but
+    never closes, the reasoning ran past ``max_new_tokens`` and no story
+    followed, so the whole tail is returned as thinking with an empty story; the
+    caller reports that case. Output without a ``<think>`` is all story.
     """
     text = text or ""
-    stripped = THINK_BLOCK_RE.sub("", text, count=1)
-    if stripped != text:
-        return stripped.strip()
-    if THINK_OPEN_RE.match(text):
+    closed = THINK_BLOCK_RE.match(text)
+    if closed:
+        return text[closed.end() :].strip(), closed.group("body").strip()
+    opened = THINK_OPEN_TAG_RE.match(text)
+    if opened:
         log.warning(
             "[minimax_h3_rewriter.story_node] the reasoning block was never closed; the story "
             "was probably cut off by max_new_tokens"
         )
-        return ""
-    return text.strip()
+        return "", text[opened.end() :].strip()
+    return text.strip(), ""
 
 
 class MiniMaxH3StoryWriter:
@@ -116,6 +118,17 @@ class MiniMaxH3StoryWriter:
                         ),
                     },
                 ),
+                "thinking": (
+                    "BOOLEAN",
+                    {
+                        "default": True,
+                        "tooltip": (
+                            "Let the model reason before writing (enable_thinking). On a model "
+                            "with a thinking mode its reasoning is separated into the 'thinking' "
+                            "output; off makes it write directly and leaves 'thinking' empty."
+                        ),
+                    },
+                ),
                 "greedy": (
                     "BOOLEAN",
                     {
@@ -143,8 +156,8 @@ class MiniMaxH3StoryWriter:
             "hidden": {"unique_id": "UNIQUE_ID"},
         }
 
-    RETURN_TYPES = ("STRING",)
-    RETURN_NAMES = ("story",)
+    RETURN_TYPES = ("STRING", "STRING")
+    RETURN_NAMES = ("story", "thinking")
     FUNCTION = "write"
     CATEGORY = CATEGORY
 
@@ -153,6 +166,7 @@ class MiniMaxH3StoryWriter:
         prompt,
         system_prompt,
         model,
+        thinking,
         greedy,
         seed,
         keep_model_loaded,
@@ -212,11 +226,11 @@ class MiniMaxH3StoryWriter:
             top_p=float(settings["top_p"]),
             top_k=int(settings["top_k"]),
             repetition_penalty=float(settings["repetition_penalty"]),
-            enable_thinking=True,
+            enable_thinking=bool(thinking),
         )
 
         raw = text or ""
-        story = _strip_think(raw)
+        story, thinking = _split_think(raw)
         if not story and raw.strip():
             progress.text(
                 "The model produced only reasoning and no story — it was likely cut off by "
@@ -225,7 +239,7 @@ class MiniMaxH3StoryWriter:
             )
         else:
             progress.text(story[-2000:] if story else "(empty story)", force=True)
-        return (story,)
+        return (story, thinking)
 
 
 NODE_CLASS_MAPPINGS = {"MiniMaxH3StoryWriter": MiniMaxH3StoryWriter}
