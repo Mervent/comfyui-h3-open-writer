@@ -21,6 +21,7 @@ from __future__ import annotations
 import logging
 
 from . import cache, discovery, guide_prompt, guides
+from .catalog import FORMAT_GGUF
 from .constants import DURATION_MAX, DURATION_MIN, REF_OUTPUT_FIELDS, RESOLUTIONS
 from .fields import split_sections
 from .nodes import (
@@ -30,6 +31,7 @@ from .nodes import (
     _ensure_file,
     _gguf_text,
     _report,
+    _resolve_adapter,
     _resolve_writer_choice,
     writer_choices,
 )
@@ -149,7 +151,10 @@ class MiniMaxH3OpenWriterRef:
                     {
                         "tooltip": (
                             "Any GGUF language model. Entries prefixed 'on disk:' are already in "
-                            "your ComfyUI model folders; the rest are fetched on first use."
+                            "your ComfyUI model folders; the rest are fetched on first use. "
+                            "With 'use_lora' on (the options node's default) the prompt-rewriter "
+                            "LoRA is applied, so the base must match it (Qwen3.6-27B); turn "
+                            "'use_lora' off to run any other GGUF plain."
                         ),
                     },
                 ),
@@ -267,6 +272,8 @@ class MiniMaxH3OpenWriterRef:
             "top_p": float(settings["top_p"]),
             "top_k": int(settings["top_k"]),
             "repetition_penalty": float(settings["repetition_penalty"]),
+            "use_lora": bool(settings["use_lora"]),
+            "adapter": settings["adapter"] if settings["use_lora"] else "",
         }
         cache_key = cache.key(messages, gen_params) if use_cache else ""
 
@@ -297,6 +304,19 @@ class MiniMaxH3OpenWriterRef:
                 f"Pick a base model from the list."
             )
 
+        adapter_path = None
+        if settings["use_lora"]:
+            problem = discovery.gguf_problem(model_path)
+            if problem:
+                raise RuntimeError(
+                    "This GGUF cannot run the prompt-rewriter LoRA.\n  - "
+                    + problem
+                    + "\nTurn 'use_lora' off to run it as a plain model anyway."
+                )
+            adapter_path = _resolve_adapter(
+                FORMAT_GGUF, settings["adapter"], settings["auto_download"], progress
+            )
+
         max_new_tokens = int(settings["max_new_tokens"])
         n_ctx = int(settings["n_ctx"])
         needed = guide_prompt.context_needed(messages, max_new_tokens)
@@ -310,7 +330,7 @@ class MiniMaxH3OpenWriterRef:
         text = _gguf_text(
             settings,
             model_path=model_path,
-            adapter_path=None,
+            adapter_path=adapter_path,
             gpu_layers=int(settings["gpu_layers"]),
             n_ctx=n_ctx,
             keep_loaded=keep_model_loaded,
@@ -340,6 +360,7 @@ class MiniMaxH3OpenWriterRef:
                     "duration": int(duration),
                     "greedy": bool(greedy),
                     "seed": int(seed),
+                    "use_lora": bool(settings["use_lora"]),
                     "prompt_preview": (prompt or "").strip()[:200],
                 },
             )
