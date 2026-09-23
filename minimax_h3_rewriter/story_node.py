@@ -20,6 +20,7 @@ Two deliberate differences from the other writers:
 from __future__ import annotations
 
 import logging
+import re
 
 from . import discovery, guide_prompt
 from .nodes import (
@@ -35,7 +36,8 @@ from .progress import NodeProgress
 
 log = logging.getLogger(__name__)
 
-THINK_CLOSE = "</think>"
+THINK_BLOCK_RE = re.compile(r"(?is)^\s*<think\b[^>]*>.*?</think\s*>\s*")
+THINK_OPEN_RE = re.compile(r"(?is)^\s*<think\b")
 
 DEFAULT_SYSTEM_PROMPT = """You are a creative fiction writer. Read the user's idea and write one short,
 self-contained story based on it.
@@ -50,15 +52,23 @@ EXAMPLE_PROMPT = "A lighthouse keeper discovers that the light has started answe
 def _strip_think(text: str) -> str:
     """Drop a leading ``<think>...</think>`` reasoning block, keep the story.
 
-    A model told to reason emits its thinking before the prose, closed by
-    ``</think>``. Everything up to and including the first such marker is
-    reasoning, not story, so it is cut; text without the marker is returned
-    unchanged. This handles both a model that writes the opening ``<think>``
-    tag itself and a chat template that pre-injects it.
+    The regex matches one opening ``<think>`` (with any attributes and any case)
+    through its matching ``</think>`` at the very start of the output, so tag
+    casing and stray whitespace no longer defeat the strip. When ``<think>``
+    opens but never closes, the reasoning ran past ``max_new_tokens`` and no
+    story followed, so the empty string is returned rather than a dump of the
+    unclosed reasoning; the caller reports that case.
     """
-    marker = text.find(THINK_CLOSE)
-    if marker != -1:
-        text = text[marker + len(THINK_CLOSE) :]
+    text = text or ""
+    stripped = THINK_BLOCK_RE.sub("", text, count=1)
+    if stripped != text:
+        return stripped.strip()
+    if THINK_OPEN_RE.match(text):
+        log.warning(
+            "[minimax_h3_rewriter.story_node] the reasoning block was never closed; the story "
+            "was probably cut off by max_new_tokens"
+        )
+        return ""
     return text.strip()
 
 
@@ -205,8 +215,16 @@ class MiniMaxH3StoryWriter:
             enable_thinking=True,
         )
 
-        story = _strip_think(text or "")
-        progress.text(story[-2000:] if story else "(empty story)", force=True)
+        raw = text or ""
+        story = _strip_think(raw)
+        if not story and raw.strip():
+            progress.text(
+                "The model produced only reasoning and no story — it was likely cut off by "
+                "max_new_tokens. Raise it and try again.",
+                force=True,
+            )
+        else:
+            progress.text(story[-2000:] if story else "(empty story)", force=True)
         return (story,)
 
 
