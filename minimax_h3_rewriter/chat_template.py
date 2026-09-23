@@ -74,12 +74,13 @@ def render(
     eos_token: str = "",
     add_generation_prompt: bool = True,
     enable_thinking: bool = False,
+    reasoning_effort: str = "",
 ) -> str:
     if not template:
         raise TemplateError("the model file carries no chat template")
 
     def attempt(payload):
-        return _environment().from_string(template).render(
+        variables = dict(
             messages=payload,
             add_generation_prompt=add_generation_prompt,
             enable_thinking=enable_thinking,
@@ -87,6 +88,9 @@ def render(
             eos_token=eos_token,
             tools=None,
         )
+        if reasoning_effort:
+            variables["reasoning_effort"] = reasoning_effort
+        return _environment().from_string(template).render(**variables)
 
     try:
         return attempt(messages)

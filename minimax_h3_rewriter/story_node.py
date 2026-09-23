@@ -48,6 +48,8 @@ and do not restate the idea. Match the language of the user's idea."""
 
 EXAMPLE_PROMPT = "A lighthouse keeper discovers that the light has started answering back."
 
+EFFORT_CHOICES = ["default", "low", "medium", "high", "xhigh"]
+
 
 def _split_think(text: str) -> tuple[str, str]:
     """Pull every ``<think>...</think>`` block out, returning (story, thinking).
@@ -130,6 +132,19 @@ class MiniMaxH3StoryWriter:
                         ),
                     },
                 ),
+                "reasoning_effort": (
+                    EFFORT_CHOICES,
+                    {
+                        "default": "default",
+                        "tooltip": (
+                            "Reasoning depth for models whose chat template reads reasoning_effort "
+                            "(e.g. Qwen3.8): low, medium, high, xhigh. 'default' leaves the "
+                            "template's own default. Only takes effect with thinking on and a "
+                            "supporting model; harmlessly ignored otherwise. Lower effort spends "
+                            "fewer tokens on thinking, which helps against truncated stories."
+                        ),
+                    },
+                ),
                 "greedy": (
                     "BOOLEAN",
                     {
@@ -168,6 +183,7 @@ class MiniMaxH3StoryWriter:
         system_prompt,
         model,
         thinking,
+        reasoning_effort,
         greedy,
         seed,
         keep_model_loaded,
@@ -228,6 +244,7 @@ class MiniMaxH3StoryWriter:
             top_k=int(settings["top_k"]),
             repetition_penalty=float(settings["repetition_penalty"]),
             enable_thinking=bool(thinking),
+            reasoning_effort="" if reasoning_effort == "default" else reasoning_effort,
         )
 
         raw = text or ""

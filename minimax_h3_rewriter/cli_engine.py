@@ -72,10 +72,16 @@ def gguf_metadata(model_path: str) -> dict:
 
 
 def render_prompt(
-    model_path: str, messages: list[dict[str, str]], enable_thinking: bool = False
+    model_path: str,
+    messages: list[dict[str, str]],
+    enable_thinking: bool = False,
+    reasoning_effort: str = "",
 ) -> str:
     return chat_template.from_metadata(
-        gguf_metadata(model_path), messages, enable_thinking=enable_thinking
+        gguf_metadata(model_path),
+        messages,
+        enable_thinking=enable_thinking,
+        reasoning_effort=reasoning_effort,
     )
 
 
@@ -141,11 +147,14 @@ def generate(
     top_k: int,
     repetition_penalty: float,
     enable_thinking: bool = False,
+    reasoning_effort: str = "",
     device: str = devices.AUTO,
     progress: NodeProgress | None = None,
 ) -> str:
     device = devices.validate(device)
-    rendered = render_prompt(model_path, messages, enable_thinking=enable_thinking)
+    rendered = render_prompt(
+        model_path, messages, enable_thinking=enable_thinking, reasoning_effort=reasoning_effort
+    )
 
     handle, prompt_file = tempfile.mkstemp(prefix="minimax_h3_", suffix=".txt")
     with os.fdopen(handle, "w", encoding="utf-8", newline="\n") as file:

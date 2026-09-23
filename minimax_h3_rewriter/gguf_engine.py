@@ -300,9 +300,16 @@ def is_loaded() -> bool:
     return _STATE["llama"] is not None
 
 
-def _render(llama, messages: list[dict[str, str]], enable_thinking: bool = False) -> str:
+def _render(
+    llama,
+    messages: list[dict[str, str]],
+    enable_thinking: bool = False,
+    reasoning_effort: str = "",
+) -> str:
     metadata = dict(getattr(llama, "metadata", {}) or {})
-    return chat_template.from_metadata(metadata, messages, enable_thinking=enable_thinking)
+    return chat_template.from_metadata(
+        metadata, messages, enable_thinking=enable_thinking, reasoning_effort=reasoning_effort
+    )
 
 
 def generate(
@@ -316,9 +323,12 @@ def generate(
     top_k: int,
     repetition_penalty: float,
     enable_thinking: bool = False,
+    reasoning_effort: str = "",
     progress: NodeProgress | None = None,
 ) -> str:
-    rendered = _render(llama, messages, enable_thinking=enable_thinking)
+    rendered = _render(
+        llama, messages, enable_thinking=enable_thinking, reasoning_effort=reasoning_effort
+    )
 
     call_kwargs = {
         "max_tokens": int(max_new_tokens),
