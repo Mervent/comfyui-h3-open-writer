@@ -22,7 +22,7 @@ from __future__ import annotations
 import logging
 import re
 
-from . import discovery, guide_prompt
+from . import cache, discovery, guide_prompt
 from .nodes import (
     CATEGORY,
     DEFAULT_OPTIONS,
@@ -173,6 +173,18 @@ class MiniMaxH3StoryWriter:
                     "BOOLEAN",
                     {"default": False, "tooltip": "Keep the writer in VRAM after the story."},
                 ),
+                "use_cache": (
+                    "BOOLEAN",
+                    {
+                        "default": True,
+                        "tooltip": (
+                            "Reuse a stored story when the prompt, system prompt, model, seed and "
+                            "every setting are unchanged, instead of running the model again. Turn "
+                            "off to always regenerate. The 'Open cache folder' button shows where "
+                            "the stories are kept."
+                        ),
+                    },
+                ),
             },
             "optional": {
                 "options": (OPTIONS_TYPE,),
@@ -195,6 +207,7 @@ class MiniMaxH3StoryWriter:
         greedy,
         seed,
         keep_model_loaded,
+        use_cache=True,
         options=None,
         unique_id=None,
     ):
@@ -210,6 +223,32 @@ class MiniMaxH3StoryWriter:
             {"role": "system", "content": (system_prompt or "").strip()},
             {"role": "user", "content": prompt},
         ]
+
+        gen_params = {
+            "model": model,
+            "greedy": bool(greedy),
+            "seed": int(seed),
+            "max_new_tokens": int(settings["max_new_tokens"]),
+            "temperature": float(settings["temperature"]),
+            "top_p": float(settings["top_p"]),
+            "top_k": int(settings["top_k"]),
+            "repetition_penalty": float(settings["repetition_penalty"]),
+            "enable_thinking": bool(thinking),
+            "reasoning_effort": "" if reasoning_effort == "default" else reasoning_effort,
+        }
+        cache_key = cache.key(messages, gen_params) if use_cache else ""
+
+        if cache_key:
+            cached = cache.load(cache_key)
+            if cached is not None:
+                story, thinking = _split_think(cached)
+                progress.text(
+                    "Reused a cached story; the model was not run.\n\n"
+                    + (story[-2000:] if story else "(empty story)"),
+                    force=True,
+                )
+                log.info("[minimax_h3_rewriter.story_node] cache hit %s", cache_key)
+                return (story, thinking, cached)
 
         choice = _resolve_writer_choice(model)
         if choice.local:
@@ -254,6 +293,20 @@ class MiniMaxH3StoryWriter:
             enable_thinking=bool(thinking),
             reasoning_effort="" if reasoning_effort == "default" else reasoning_effort,
         )
+
+        if cache_key:
+            cache.store(
+                cache_key,
+                text=text,
+                meta={
+                    "model": model,
+                    "greedy": bool(greedy),
+                    "seed": int(seed),
+                    "thinking": bool(thinking),
+                    "reasoning_effort": "" if reasoning_effort == "default" else reasoning_effort,
+                    "prompt_preview": (prompt or "").strip()[:200],
+                },
+            )
 
         raw = text or ""
         story, thinking = _split_think(raw)
