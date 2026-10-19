@@ -3,7 +3,7 @@ import { app } from "../../scripts/app.js";
 app.registerExtension({
     name: "h3_open_writer.open_guide_folder",
     async beforeRegisterNodeDef(nodeType, nodeData) {
-        if (nodeData.name !== "MiniMaxH3OpenWriterRef") return;
+        if (!["MiniMaxH3OpenWriterRef", "MiniMaxH3OpenWriterFL2VA"].includes(nodeData.name)) return;
         const onNodeCreated = nodeType.prototype.onNodeCreated;
         nodeType.prototype.onNodeCreated = function () {
             const result = onNodeCreated ? onNodeCreated.apply(this, arguments) : undefined;
