@@ -9,13 +9,19 @@ It reuses the runtime the rewriter already fetches -- ``llama-mtmd-cli`` ships i
 the same release archive as ``llama-completion``, so a machine that has run one
 rewrite already has everything this needs.
 
-Two differences from ``cli_engine`` are worth knowing:
+Three differences from ``cli_engine`` are worth knowing:
 
-- **The chat template is applied by the binary**, not here. ``-p`` is a plain
-  instruction and mtmd wraps it, which is also what lets it splice the media
-  tokens into the right place in the turn. Rendering the template ourselves, as
-  the rewriter does to force ``enable_thinking=False``, would put the image
-  markers in the wrong position.
+- **For a caption, the chat template is applied by the binary**, not here.
+  ``-p`` is a plain instruction and mtmd wraps it, which is also what lets it
+  splice the media tokens into the right place in the turn.
+- **For a story, it is applied here** (:func:`write`), because the binary has no
+  way to pass ``enable_thinking``: ``llama-mtmd-cli`` takes no
+  ``--chat-template-kwargs``, its legacy formatter lets Qwen3.x think whether
+  asked or not, and with ``--jinja`` it renders the system turn on its own,
+  which Qwen's template refuses ("No user query found"). So the whole
+  conversation is rendered with the model's own template, one media marker per
+  picture is put into the user turn by hand, and the binary is handed a
+  template that returns the prompt unchanged.
 - **The prompt goes on the command line**, not through ``--file``. There is no
   shell in the way -- the command is a list -- so quotes and newlines in an
   instruction need no escaping, and ``-f`` is not honoured alongside media.
@@ -30,7 +36,7 @@ from __future__ import annotations
 import logging
 import os
 
-from . import devices, llamacpp, media, runner
+from . import cli_engine, devices, llamacpp, media, runner
 from .constants import normalize_seed
 from .progress import NodeProgress
 
@@ -46,6 +52,17 @@ DEFAULT_MAX_TOKENS = 256
 FLAG_FOR_KIND = {"image": "--image", "audio": "--audio"}
 
 CONTEXT_FROM_MODEL = 0
+
+#: What ``mtmd`` replaces with an attachment's tokens: ``mtmd_default_marker()``.
+MEDIA_MARKER = "<__media__>"
+
+#: Hands a prompt rendered by :func:`write` back to the binary untouched.
+PASSTHROUGH_TEMPLATE = "{{ messages[0].content }}"
+
+UNSUPPORTED_PROJECTOR = (
+    "Not every multimodal GGUF works here: llama.cpp's mtmd has to understand the projector "
+    "format, and several current models abort while loading it."
+)
 
 
 def build_command(
@@ -65,6 +82,8 @@ def build_command(
     device: str = devices.AUTO,
     adapter_path: str | None = None,
     system_prompt: str = "",
+    repetition_penalty: float = 1.0,
+    prerendered: bool = False,
 ) -> list[str]:
     layers = devices.layers_for(device, gpu_layers)
     layers = ALL_LAYERS if layers < 0 else layers
@@ -77,6 +96,7 @@ def build_command(
         "--ctx-size", str(int(n_ctx)),
         "--predict", str(int(max_new_tokens)),
         "--seed", str(normalize_seed(seed)),
+        "--repeat-penalty", f"{float(repetition_penalty):g}",
     ]
     if adapter_path:
         command += ["--lora", adapter_path]
@@ -95,6 +115,9 @@ def build_command(
         ]
     if system_prompt:
         command += ["--system-prompt", system_prompt]
+    if prerendered:
+        # --jinja first: without it --chat-template accepts built-in names only.
+        command += ["--jinja", "--chat-template", PASSTHROUGH_TEMPLATE]
     # Last, so the instruction is never mistaken for a value of another flag.
     command += ["--prompt", instruction]
     return command
@@ -216,32 +239,98 @@ def describe(
             adapter_path, system_prompt,
         )
 
-        runner.free_comfy_vram(device)
+        return _run(
+            binary, command, "Describing", notes, model_path, adapter_path, device,
+            max_new_tokens, progress,
+            hint=f"{UNSUPPORTED_PROJECTOR} Pick an entry from the captioner list, which names "
+            f"the ones this pack has been run against.",
+        )
+
+
+def write(
+    model_path: str,
+    mmproj_path: str,
+    messages: list[dict[str, str]],
+    image,
+    max_images: int = media.DEFAULT_MAX_FRAMES,
+    enable_thinking: bool = False,
+    reasoning_effort: str = "",
+    gpu_layers: int = -1,
+    n_ctx: int = CONTEXT_FROM_MODEL,
+    seed: int = 42,
+    greedy: bool = False,
+    max_new_tokens: int = DEFAULT_MAX_TOKENS,
+    temperature: float = 0.7,
+    top_p: float = 0.8,
+    top_k: int = 20,
+    repetition_penalty: float = 1.0,
+    device: str = devices.AUTO,
+    backend: str = "auto",
+    auto_download: bool = True,
+    progress: NodeProgress | None = None,
+) -> str:
+    """Answer a chat whose last user turn comes with pictures, honouring ``enable_thinking``.
+
+    Every image of the batch (evenly thinned to ``max_images``) is one picture,
+    put in front of the last turn's text in batch order. The conversation is
+    rendered with the model's own template -- see the module docstring for why
+    the binary cannot be trusted with it here.
+    """
+    device = devices.validate(device)
+    binary = llamacpp.ensure_mtmd(backend, auto_download, progress)
+
+    with media.Workspace() as workspace:
+        paths = media.image_files(image, workspace, max_images, prefix="picture")
+        turns = [dict(message) for message in messages]
+        turns[-1]["content"] = f"{MEDIA_MARKER * len(paths)}\n{turns[-1]['content']}"
+        rendered = cli_engine.render_prompt(
+            model_path, turns, enable_thinking=enable_thinking, reasoning_effort=reasoning_effort
+        )
+        command = build_command(
+            binary, model_path, mmproj_path, rendered, [("image", path) for path in paths],
+            gpu_layers, n_ctx, seed, greedy, max_new_tokens, temperature, top_p, top_k, device,
+            repetition_penalty=repetition_penalty, prerendered=True,
+        )
+        return _run(
+            binary, command, "Writing", [f"{len(paths)} picture(s)"], model_path, None, device,
+            max_new_tokens, progress, hint=UNSUPPORTED_PROJECTOR,
+        )
+
+
+def _run(
+    binary: str,
+    command: list[str],
+    verb: str,
+    notes: list[str],
+    model_path: str,
+    adapter_path: str | None,
+    device: str,
+    max_new_tokens: int,
+    progress: NodeProgress | None,
+    hint: str,
+) -> str:
+    """Run one prepared command while its attachments still exist, and return stdout."""
+    runner.free_comfy_vram(device)
+    if progress is not None:
+        where = "" if device == devices.AUTO else f" on {device}"
+        lora = f" + {os.path.basename(adapter_path)}" if adapter_path else ""
+        progress.set_total(max(int(max_new_tokens), 1))
+        progress.text(
+            f"{verb} {' + '.join(notes)}\n{os.path.basename(model_path)}{lora}{where}",
+            force=True,
+        )
+
+    def report(whole: str) -> None:
         if progress is not None:
-            where = "" if device == devices.AUTO else f" on {device}"
-            lora = f" + {os.path.basename(adapter_path)}" if adapter_path else ""
-            progress.set_total(max(int(max_new_tokens), 1))
-            progress.text(
-                f"Describing {' + '.join(notes)}\n{os.path.basename(model_path)}{lora}{where}",
-                force=True,
+            progress.update(
+                min(len(whole) / CHARS_PER_TOKEN, float(max_new_tokens)),
+                f"{verb} · {len(whole)} chars\n{whole[-PREVIEW_TAIL:]}",
             )
 
-        def report(whole: str) -> None:
-            if progress is not None:
-                progress.update(
-                    min(len(whole) / CHARS_PER_TOKEN, float(max_new_tokens)),
-                    f"Describing · {len(whole)} chars\n{whole[-PREVIEW_TAIL:]}",
-                )
-
-        try:
-            text, stderr_text = runner.run(command, binary, report)
-        except runner.ChildFailed as error:
-            raise RuntimeError(
-                f"{error}\n\nNot every multimodal GGUF works here: llama.cpp's mtmd has to "
-                f"understand the projector format, and several current models abort while "
-                f"loading it. Pick an entry from the captioner list, which names the ones this "
-                f"pack has been run against."
-            ) from error
+    try:
+        text, stderr_text = runner.run(command, binary, report)
+    except runner.ChildFailed as error:
+        raise RuntimeError(f"{error}\n\n{hint}") from error
 
     if progress is not None:
         progress.finish(f"Done · {len(text)} chars{runner.speed(stderr_text)}")

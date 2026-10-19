@@ -600,6 +600,25 @@ def _pair_mmproj(model: str, projectors: list[str], models: int = 1) -> str:
     return best if best_score >= 6 else ""
 
 
+def projector_for(model_path: str) -> str:
+    """The projector beside one model, or ``""`` when there is none or it is ambiguous.
+
+    The same pairing rule as :func:`scan_captioner_gguf`, applied to one folder:
+    for a writer that is offered every GGUF, and only needs a projector once it
+    is handed a picture.
+    """
+    models, projectors = [], []
+    for path in _gguf_candidates(os.path.dirname(os.path.abspath(model_path)), 0):
+        kind = gguf_header(path)["kind"]
+        if kind == "mmproj":
+            projectors.append(path)
+        elif kind == "model":
+            models.append(path)
+    if not projectors:
+        return ""
+    return _pair_mmproj(model_path, projectors, len(models))
+
+
 def scan_captioner_gguf(arch: str | None = None) -> list[tuple[str, str, str]]:
     """Return ``(label, model path, mmproj path)`` for local multimodal pairs.
 

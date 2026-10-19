@@ -15,14 +15,22 @@ Two deliberate differences from the other writers:
   story, so only the prose comes out.
 - **No template.** ``system_prompt`` is a plain writing instruction, the guide
   and the structured fields are gone, and the raw generation is returned as-is.
+
+Connect ``image`` and the same model looks at the pictures before it writes.
+That run goes through ``llama-mtmd-cli`` instead (see ``mtmd_engine.write``),
+so the model needs its projector (``mmproj``) in the same folder, and it is a
+fresh process each time: ``keep_model_loaded`` has no effect there.
 """
 
 from __future__ import annotations
 
+import hashlib
 import logging
+import math
+import os
 import re
 
-from . import cache, discovery, guide_prompt
+from . import cache, discovery, guide_prompt, media, mtmd_engine
 from .nodes import (
     CATEGORY,
     DEFAULT_OPTIONS,
@@ -41,7 +49,8 @@ THINK_OPEN_TAG_RE = re.compile(r"(?is)<think\b[^>]*>")
 THINK_CLOSE_RE = re.compile(r"(?is)</think\s*>")
 
 DEFAULT_SYSTEM_PROMPT = """You are a creative fiction writer. Read the user's idea and write one short,
-self-contained story based on it.
+self-contained story based on it. If pictures are attached, build the story on
+what they show.
 
 Write only the story itself -- vivid prose with a clear beginning, middle, and
 end. Do not add a title, headings, author notes, commentary, or explanations,
@@ -50,6 +59,18 @@ and do not restate the idea. Match the language of the user's idea."""
 EXAMPLE_PROMPT = "A lighthouse keeper discovers that the light has started answering back."
 
 EFFORT_CHOICES = ["default", "low", "medium", "high", "xhigh"]
+
+#: Pictures taken from one IMAGE batch, spread evenly, as the captioners do.
+MAX_PICTURES = media.DEFAULT_MAX_FRAMES
+
+#: Pixels per vision-token side at the finest among common projectors: Qwen2.5-VL
+#: merges 14-pixel patches two by two. Newer Qwen merges 16-pixel ones and Gemma
+#: spends a fixed budget, so this reserves too much rather than too little -- mtmd
+#: fails a run outright when the pictures do not fit the context.
+PIXELS_PER_TOKEN_SIDE = 28
+
+#: The marker and the begin/end tokens mtmd wraps around each picture.
+TOKENS_AROUND_PICTURE = 16
 
 
 def _split_think(text: str) -> tuple[str, str]:
@@ -85,6 +106,47 @@ def _split_think(text: str) -> tuple[str, str]:
     return story.strip(), thinking
 
 
+def _picture_count(image) -> int:
+    return min(int(image.shape[0]), MAX_PICTURES)
+
+
+def _picture_tokens(image) -> int:
+    """A generous context reserve for the pictures of an IMAGE batch (batch, height, width, channels)."""
+    height, width = int(image.shape[1]), int(image.shape[2])
+    per_picture = (
+        math.ceil(height / PIXELS_PER_TOKEN_SIDE) * math.ceil(width / PIXELS_PER_TOKEN_SIDE)
+        + TOKENS_AROUND_PICTURE
+    )
+    return _picture_count(image) * per_picture
+
+
+def _image_digest(image) -> str:
+    """A hash of the pixels, so a cached story is never reused for another picture."""
+    import numpy
+
+    array = image.detach().cpu().numpy() if hasattr(image, "detach") else numpy.asarray(image)
+    digest = hashlib.sha256(repr(array.shape).encode("ascii"))
+    digest.update(numpy.ascontiguousarray(array).tobytes())
+    return digest.hexdigest()
+
+
+def _projector(model_path: str) -> str:
+    """The model's own projector, or a refusal that says how to provide one."""
+    mmproj_path = discovery.projector_for(model_path)
+    if not mmproj_path:
+        raise RuntimeError(
+            f"'{os.path.basename(model_path)}' has no projector beside it, so it cannot see the "
+            f"picture. Put its 'mmproj-*.gguf' into the same folder -- alone with the model, or "
+            f"named after it when the folder holds several -- or disconnect 'image'."
+        )
+    if not discovery.gguf_header(mmproj_path)["vision"]:
+        raise RuntimeError(
+            f"'{os.path.basename(mmproj_path)}' was built without a vision encoder, so "
+            f"'{os.path.basename(model_path)}' cannot see the picture."
+        )
+    return mmproj_path
+
+
 class MiniMaxH3StoryWriter:
     """Write a short, free-form story from a prompt, with model reasoning enabled."""
 
@@ -92,7 +154,8 @@ class MiniMaxH3StoryWriter:
         "A minimal free-form writer: give it an idea and it writes one short story, with no "
         "MiniMax-H3 guide, no structured fields, and no post-parsing. Model reasoning is enabled "
         "and the resulting <think> block is stripped, so only the prose is returned. Runs on any "
-        "instruction-following GGUF through the vendored engine."
+        "instruction-following GGUF through the vendored engine. Connect 'image' and a model "
+        "with its mmproj looks at the pictures and writes the story about them."
     )
 
     @classmethod
@@ -125,7 +188,8 @@ class MiniMaxH3StoryWriter:
                             "Any GGUF language model. Entries prefixed 'on disk:' are already in "
                             "your ComfyUI model folders; the rest are fetched on first use. No LoRA "
                             "is applied. A model with a thinking mode (e.g. Qwen3) reasons before "
-                            "writing; the reasoning is stripped from the output."
+                            "writing; the reasoning is stripped from the output. With 'image' "
+                            "connected, the model's 'mmproj-*.gguf' has to sit in the same folder."
                         ),
                     },
                 ),
@@ -171,22 +235,38 @@ class MiniMaxH3StoryWriter:
                 ),
                 "keep_model_loaded": (
                     "BOOLEAN",
-                    {"default": False, "tooltip": "Keep the writer in VRAM after the story."},
+                    {
+                        "default": False,
+                        "tooltip": (
+                            "Keep the writer in VRAM after the story. No effect with 'image' "
+                            "connected: that run is a separate process, and the model leaves with it."
+                        ),
+                    },
                 ),
                 "use_cache": (
                     "BOOLEAN",
                     {
                         "default": True,
                         "tooltip": (
-                            "Reuse a stored story when the prompt, system prompt, model, seed and "
-                            "every setting are unchanged, instead of running the model again. Turn "
-                            "off to always regenerate. The 'Open cache folder' button shows where "
-                            "the stories are kept."
+                            "Reuse a stored story when the prompt, system prompt, pictures, model, "
+                            "seed and every setting are unchanged, instead of running the model "
+                            "again. Turn off to always regenerate. The 'Open cache folder' button "
+                            "shows where the stories are kept."
                         ),
                     },
                 ),
             },
             "optional": {
+                "image": (
+                    "IMAGE",
+                    {
+                        "tooltip": (
+                            f"Pictures for the model to look at before it writes; a batch is up "
+                            f"to {MAX_PICTURES} separate pictures, in order. Needs a model with "
+                            f"its mmproj in the same folder, e.g. Qwen3.6 or Gemma-4."
+                        ),
+                    },
+                ),
                 "options": (OPTIONS_TYPE,),
             },
             "hidden": {"unique_id": "UNIQUE_ID"},
@@ -208,6 +288,7 @@ class MiniMaxH3StoryWriter:
         seed,
         keep_model_loaded,
         use_cache=True,
+        image=None,
         options=None,
         unique_id=None,
     ):
@@ -224,6 +305,7 @@ class MiniMaxH3StoryWriter:
             {"role": "user", "content": prompt},
         ]
 
+        effort = "" if reasoning_effort == "default" else reasoning_effort
         gen_params = {
             "model": model,
             "greedy": bool(greedy),
@@ -234,8 +316,10 @@ class MiniMaxH3StoryWriter:
             "top_k": int(settings["top_k"]),
             "repetition_penalty": float(settings["repetition_penalty"]),
             "enable_thinking": bool(thinking),
-            "reasoning_effort": "" if reasoning_effort == "default" else reasoning_effort,
+            "reasoning_effort": effort,
         }
+        if image is not None:
+            gen_params["images"] = _image_digest(image)
         cache_key = cache.key(messages, gen_params) if use_cache else ""
 
         if cache_key:
@@ -266,6 +350,8 @@ class MiniMaxH3StoryWriter:
         max_new_tokens = int(settings["max_new_tokens"])
         n_ctx = int(settings["n_ctx"])
         needed = guide_prompt.context_needed(messages, max_new_tokens)
+        if image is not None:
+            needed += _picture_tokens(image)
         if needed > n_ctx:
             progress.text(
                 f"the prompt needs a {needed}-token context, raising n_ctx from {n_ctx}",
@@ -273,16 +359,11 @@ class MiniMaxH3StoryWriter:
             )
             n_ctx = needed
 
-        text = _gguf_text(
-            settings,
-            model_path=model_path,
-            adapter_path=None,
+        sampling = dict(
             gpu_layers=int(settings["gpu_layers"]),
             n_ctx=n_ctx,
-            keep_loaded=keep_model_loaded,
             device=settings["device"],
             progress=progress,
-            messages=messages,
             seed=int(seed),
             greedy=greedy,
             max_new_tokens=max_new_tokens,
@@ -291,8 +372,34 @@ class MiniMaxH3StoryWriter:
             top_k=int(settings["top_k"]),
             repetition_penalty=float(settings["repetition_penalty"]),
             enable_thinking=bool(thinking),
-            reasoning_effort="" if reasoning_effort == "default" else reasoning_effort,
+            reasoning_effort=effort,
         )
+        if image is None:
+            text = _gguf_text(
+                settings,
+                model_path=model_path,
+                adapter_path=None,
+                keep_loaded=keep_model_loaded,
+                messages=messages,
+                **sampling,
+            )
+        else:
+            mmproj_path = _projector(model_path)
+            if keep_model_loaded:
+                log.info(
+                    "[minimax_h3_rewriter.story_node] keep_model_loaded has no effect with "
+                    "'image' connected: llama-mtmd-cli is a fresh process per run"
+                )
+            text = mtmd_engine.write(
+                model_path=model_path,
+                mmproj_path=mmproj_path,
+                messages=messages,
+                image=image,
+                max_images=MAX_PICTURES,
+                backend=settings["llama_backend"],
+                auto_download=settings["auto_download"],
+                **sampling,
+            )
 
         if cache_key:
             cache.store(
@@ -303,7 +410,8 @@ class MiniMaxH3StoryWriter:
                     "greedy": bool(greedy),
                     "seed": int(seed),
                     "thinking": bool(thinking),
-                    "reasoning_effort": "" if reasoning_effort == "default" else reasoning_effort,
+                    "reasoning_effort": effort,
+                    "pictures": _picture_count(image) if image is not None else 0,
                     "prompt_preview": (prompt or "").strip()[:200],
                 },
             )

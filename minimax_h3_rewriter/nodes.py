@@ -666,7 +666,20 @@ class MiniMaxH3RewriterOptions:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "max_new_tokens": ("INT", {"default": 2048, "min": 64, "max": 16384, "step": 64}),
+                "max_new_tokens": (
+                    "INT",
+                    {
+                        "default": 2048,
+                        "min": 64,
+                        "max": 81920,
+                        "step": 64,
+                        "tooltip": (
+                            "Most tokens the model may generate, reasoning included. A thinking "
+                            "model needs far more than the text itself: Qwen3.6's card asks for "
+                            "32768, up to 81920 for the hardest tasks. Keep n_ctx above it."
+                        ),
+                    },
+                ),
                 "temperature": ("FLOAT", {"default": 0.7, "min": 0.0, "max": 2.0, "step": 0.01}),
                 "top_p": ("FLOAT", {"default": 0.8, "min": 0.0, "max": 1.0, "step": 0.01}),
                 "top_k": ("INT", {"default": 20, "min": 0, "max": 200}),
@@ -718,9 +731,14 @@ class MiniMaxH3RewriterOptions:
                     {
                         "default": 8192,
                         "min": 2048,
-                        "max": 131072,
+                        "max": 262144,
                         "step": 1024,
-                        "tooltip": "GGUF only: context size llama.cpp allocates.",
+                        "tooltip": (
+                            "GGUF only: context size llama.cpp allocates; every token costs "
+                            "KV-cache memory. The guided, creative, open and story writers raise "
+                            "it on their own when the prompt plus max_new_tokens would not fit; "
+                            "the Prompt Rewriter and the 8B rewriter use it as set."
+                        ),
                     },
                 ),
                 "gguf_runtime": (
