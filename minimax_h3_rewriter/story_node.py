@@ -11,8 +11,9 @@ Two deliberate differences from the other writers:
 - **Reasoning is enabled.** Every other node forces ``enable_thinking=False``
   through the vendored engine; this one passes ``enable_thinking=True`` so a
   model that supports a thinking phase (e.g. Qwen3) may reason before writing.
-  The ``<think>...</think>`` block the model emits is stripped from the returned
-  story, so only the prose comes out.
+  The reasoning block the model emits (``<think>...</think>``, or Gemma-4's
+  ``<|channel>thought ... <channel|>``) is stripped from the returned story, so
+  only the prose comes out.
 - **No template.** ``system_prompt`` is a plain writing instruction, the guide
   and the structured fields are gone, and the raw generation is returned as-is.
 
@@ -44,9 +45,13 @@ from .progress import NodeProgress
 
 log = logging.getLogger(__name__)
 
-THINK_BLOCK_RE = re.compile(r"(?is)<think\b[^>]*>(?P<body>.*?)</think\s*>")
-THINK_OPEN_TAG_RE = re.compile(r"(?is)<think\b[^>]*>")
-THINK_CLOSE_RE = re.compile(r"(?is)</think\s*>")
+# Qwen-style models wrap reasoning in <think>...</think>; Gemma-4 writes it into a
+# thought channel, <|channel>thought\n...<channel|>, with the channel name inside.
+_THINK_OPEN = r"(?:<think\b[^>]*>|<\|channel>(?:thought\b)?)"
+_THINK_CLOSE = r"(?:</think\s*>|<channel\|>)"
+THINK_BLOCK_RE = re.compile(rf"(?is){_THINK_OPEN}(?P<body>.*?){_THINK_CLOSE}")
+THINK_OPEN_TAG_RE = re.compile(rf"(?is){_THINK_OPEN}")
+THINK_CLOSE_RE = re.compile(rf"(?is){_THINK_CLOSE}")
 
 DEFAULT_SYSTEM_PROMPT = """You are a creative fiction writer. Read the user's idea and write one short,
 self-contained story based on it. If pictures are attached, build the story on
@@ -76,14 +81,15 @@ TOKENS_AROUND_PICTURE = 16
 def _split_think(text: str) -> tuple[str, str]:
     """Separate reasoning from story, returning (story, thinking).
 
-    The split keys off the closing ``</think>``, not a matching pair: Qwen-style
+    The split keys off the closing tag, not a matching pair: Qwen-style
     templates pre-inject the opening ``<think>`` into the prompt, so the model's
     output usually carries only the closing tag. Everything before the first
-    ``</think>`` (minus a stray leading ``<think>``) is reasoning and the rest is
-    the story. Fully paired blocks anywhere are pulled out first, and a lone
-    unclosed ``<think>`` is treated as reasoning truncated by ``max_new_tokens``.
-    Surrounding newlines are dropped; tag case, attributes, and whitespace inside
-    the closing tag are ignored.
+    closing tag (minus a stray leading opener) is reasoning and the rest is the
+    story. Fully paired blocks anywhere are pulled out first, and a lone unclosed
+    opener is treated as reasoning truncated by ``max_new_tokens``. Both
+    ``<think>``/``</think>`` and Gemma-4's ``<|channel>thought``/``<channel|>``
+    are recognised. Surrounding newlines are dropped; tag case, attributes, and
+    whitespace inside the closing ``</think>`` are ignored.
     """
     text = text or ""
     thoughts = [match.group("body").strip() for match in THINK_BLOCK_RE.finditer(text)]
@@ -153,7 +159,7 @@ class MiniMaxH3StoryWriter:
     DESCRIPTION = (
         "A minimal free-form writer: give it an idea and it writes one short story, with no "
         "MiniMax-H3 guide, no structured fields, and no post-parsing. Model reasoning is enabled "
-        "and the resulting <think> block is stripped, so only the prose is returned. Runs on any "
+        "and the resulting reasoning block is stripped, so only the prose is returned. Runs on any "
         "instruction-following GGUF through the vendored engine. Connect 'image' and a model "
         "with its mmproj looks at the pictures and writes the story about them."
     )
