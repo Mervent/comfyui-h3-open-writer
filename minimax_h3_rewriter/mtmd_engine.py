@@ -6,10 +6,10 @@ comes back as one or two sentences, which then become a line of
 ``reference_assets``.
 
 It reuses the runtime the rewriter already fetches -- ``llama-mtmd-cli`` ships in
-the same release archive as ``llama-completion``, so a machine that has run one
+the same release archive as ``llama-server``, so a machine that has run one
 rewrite already has everything this needs.
 
-Three differences from ``cli_engine`` are worth knowing:
+Three differences from ``server_engine`` are worth knowing:
 
 - **For a caption, the chat template is applied by the binary**, not here.
   ``-p`` is a plain instruction and mtmd wraps it, which is also what lets it
@@ -36,7 +36,7 @@ from __future__ import annotations
 import logging
 import os
 
-from . import cli_engine, devices, llamacpp, media, runner
+from . import devices, llamacpp, media, runner, server_engine
 from .constants import normalize_seed
 from .progress import NodeProgress
 
@@ -83,6 +83,7 @@ def build_command(
     adapter_path: str | None = None,
     system_prompt: str = "",
     repetition_penalty: float = 1.0,
+    presence_penalty: float = 0.0,
     prerendered: bool = False,
 ) -> list[str]:
     layers = devices.layers_for(device, gpu_layers)
@@ -97,6 +98,7 @@ def build_command(
         "--predict", str(int(max_new_tokens)),
         "--seed", str(normalize_seed(seed)),
         "--repeat-penalty", f"{float(repetition_penalty):g}",
+        "--presence-penalty", f"{float(presence_penalty):g}",
     ]
     if adapter_path:
         command += ["--lora", adapter_path]
@@ -264,6 +266,7 @@ def write(
     top_p: float = 0.8,
     top_k: int = 20,
     repetition_penalty: float = 1.0,
+    presence_penalty: float = 0.0,
     device: str = devices.AUTO,
     backend: str = "auto",
     auto_download: bool = True,
@@ -283,13 +286,14 @@ def write(
         paths = media.image_files(image, workspace, max_images, prefix="picture")
         turns = [dict(message) for message in messages]
         turns[-1]["content"] = f"{MEDIA_MARKER * len(paths)}\n{turns[-1]['content']}"
-        rendered = cli_engine.render_prompt(
+        rendered = server_engine.render_prompt(
             model_path, turns, enable_thinking=enable_thinking, reasoning_effort=reasoning_effort
         )
         command = build_command(
             binary, model_path, mmproj_path, rendered, [("image", path) for path in paths],
             gpu_layers, n_ctx, seed, greedy, max_new_tokens, temperature, top_p, top_k, device,
-            repetition_penalty=repetition_penalty, prerendered=True,
+            repetition_penalty=repetition_penalty, presence_penalty=presence_penalty,
+            prerendered=True,
         )
         return _run(
             binary, command, "Writing", [f"{len(paths)} picture(s)"], model_path, None, device,

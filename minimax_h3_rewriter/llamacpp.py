@@ -1,7 +1,7 @@
 """The official llama.cpp binaries, fetched on demand.
 
-``llama-cpp-python`` is the fast path when it is already installed, and a
-dependency nobody should have to fight when it is not. Its prebuilt CUDA wheels
+``llama-cpp-python`` is an optional extra rather than the default runtime, and a
+dependency nobody should have to fight when it is not there. Its prebuilt CUDA wheels
 fail on ordinary consumer hardware in two unrelated ways -- the ones through
 ``cu130`` are compiled with AVX-512 and die with ``0xC000001D`` on any consumer
 Intel 12th-14th generation chip, and ``cu132`` drops AVX-512 but ships PTX that
@@ -14,8 +14,9 @@ runs under ``llama-cli`` on a machine where the wheel crashes. The CUDA archive
 carries native SASS and no PTX at all (``sm_86 sm_89 sm_120a sm_121a``), so the
 driver never has to JIT anything.
 
-So: if the wheel is there, use it; otherwise fetch about 30 MB of official
-binaries and run the rewriter in a subprocess.
+So: fetch about 30 MB of official binaries and run the model in a subprocess
+(``llama-server``, see ``server_engine.py``); the wheel is used only when asked
+for by name.
 
 ``auto`` takes CUDA where the card can actually run it and Vulkan everywhere
 else. Vulkan is 32 MB against 511 MB, works on AMD and Intel too, and is the
@@ -87,6 +88,7 @@ BINARY = BINARIES[0]
 SUBDIR = "runtime"
 
 MTMD_BINARIES = (f"llama-mtmd-cli{EXE}",)
+SERVER_BINARIES = (f"llama-server{EXE}",)
 
 
 #: Compute capabilities the CUDA archive actually carries code for.
@@ -258,21 +260,31 @@ def download_size(backend: str) -> int:
     return sum(asset_sizes(assets(backend)).values())
 
 
-def ensure_mtmd(backend: str, auto_download: bool, progress=None) -> str:
-    """Return the path to ``llama-mtmd-cli``, fetching the release if allowed.
+def _ensure_tool(names: tuple[str, ...], backend: str, auto_download: bool, progress=None) -> str:
+    """Return the path to another executable of the same release, fetching it if allowed.
 
-    Same archive, same install directory: a captioner run on a machine that has
-    already rewritten a prompt downloads nothing.
+    Same archive, same install directory: a run on a machine that has already
+    used any of the binaries downloads nothing.
     """
     ensure(backend, auto_download, progress)
     directory = install_dir(resolve_backend(backend))
-    binary = find_binary(directory, MTMD_BINARIES)
+    binary = find_binary(directory, names)
     if not binary:
         raise RuntimeError(
-            f"'{MTMD_BINARIES[0]}' is not in '{directory}'. Release {RELEASE} should carry it "
+            f"'{names[0]}' is not in '{directory}'. Release {RELEASE} should carry it "
             f"beside {BINARY}; delete that folder to fetch the archive again."
         )
     return binary
+
+
+def ensure_mtmd(backend: str, auto_download: bool, progress=None) -> str:
+    """Return the path to ``llama-mtmd-cli``, fetching the release if allowed."""
+    return _ensure_tool(MTMD_BINARIES, backend, auto_download, progress)
+
+
+def ensure_server(backend: str, auto_download: bool, progress=None) -> str:
+    """Return the path to ``llama-server``, fetching the release if allowed."""
+    return _ensure_tool(SERVER_BINARIES, backend, auto_download, progress)
 
 
 def ensure(backend: str, auto_download: bool, progress=None) -> str:

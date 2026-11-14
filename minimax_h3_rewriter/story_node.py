@@ -371,6 +371,7 @@ class MiniMaxH3StoryWriter:
             "top_p": float(settings["top_p"]),
             "top_k": int(settings["top_k"]),
             "repetition_penalty": float(settings["repetition_penalty"]),
+            "presence_penalty": float(settings["presence_penalty"]),
             "enable_thinking": bool(thinking),
             "reasoning_effort": effort,
         }
@@ -429,6 +430,7 @@ class MiniMaxH3StoryWriter:
             top_p=float(settings["top_p"]),
             top_k=int(settings["top_k"]),
             repetition_penalty=float(settings["repetition_penalty"]),
+            presence_penalty=float(settings["presence_penalty"]),
             enable_thinking=bool(thinking),
             reasoning_effort=effort,
         )

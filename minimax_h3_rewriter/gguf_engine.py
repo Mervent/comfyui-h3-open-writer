@@ -61,13 +61,14 @@ def wheel_url() -> str:
 
 def _install_hint() -> str:
     head = (
-        "GGUF models need llama-cpp-python, which is not installed in this Python "
+        "gguf_runtime is set to 'llama-cpp-python', which is not installed in this Python "
         "environment.\n"
     )
     tail = (
-        "\nInstalling it is optional: without it the node runs GGUF models through the "
-        "official llama.cpp binaries instead, which it fetches on first use. The wheel is "
-        "worth having only if you want the model to stay resident between runs."
+        "\nInstalling it is optional: 'auto' runs GGUF models through the official "
+        "llama.cpp binaries, which the node fetches on first use, and those also run "
+        "multi-token prediction. The wheel is worth having only if you want the model to "
+        "stay resident between runs."
     )
     url = wheel_url()
     if not url:
@@ -248,6 +249,8 @@ def load(
             "model_path": model_path,
             "n_gpu_layers": devices.layers_for(device, gpu_layers),
             "n_ctx": int(n_ctx),
+            # llama-cpp-python maps False to "disabled", not to llama.cpp's own "auto".
+            "flash_attn": True,
             "verbose": False,
         }
         kwargs.update(devices.llama_cpp_kwargs(device))
@@ -322,6 +325,7 @@ def generate(
     top_p: float,
     top_k: int,
     repetition_penalty: float,
+    presence_penalty: float = 0.0,
     enable_thinking: bool = False,
     reasoning_effort: str = "",
     progress: NodeProgress | None = None,
@@ -333,6 +337,7 @@ def generate(
     call_kwargs = {
         "max_tokens": int(max_new_tokens),
         "repeat_penalty": float(repetition_penalty),
+        "presence_penalty": float(presence_penalty),
         "stream": True,
         "seed": normalize_seed(seed),
     }

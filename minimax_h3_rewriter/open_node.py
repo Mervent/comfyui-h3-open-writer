@@ -286,6 +286,7 @@ def _write(
         "top_p": float(settings["top_p"]),
         "top_k": int(settings["top_k"]),
         "repetition_penalty": float(settings["repetition_penalty"]),
+        "presence_penalty": float(settings["presence_penalty"]),
         "use_lora": bool(settings["use_lora"]),
         "adapter": settings["adapter"] if settings["use_lora"] else "",
     }

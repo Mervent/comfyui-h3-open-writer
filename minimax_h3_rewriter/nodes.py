@@ -10,7 +10,6 @@ import re
 
 from . import (
     catalog,
-    cli_engine,
     clip_caption,
     devices,
     discovery,
@@ -22,6 +21,7 @@ from . import (
     llamacpp,
     media,
     mtmd_engine,
+    server_engine,
 )
 from .catalog import FORMAT_GGUF, FORMAT_TRANSFORMERS
 from .constants import (
@@ -38,7 +38,6 @@ from .constants import (
     REF_OUTPUT_FIELDS,
     RESOLUTIONS,
     RUNTIME_AUTO,
-    RUNTIME_BINARY,
     RUNTIME_WHEEL,
 )
 from .fields import missing, split_fields, split_sections
@@ -63,6 +62,8 @@ DEFAULT_OPTIONS = {
     "top_p": 0.8,
     "top_k": 20,
     "repetition_penalty": 1.05,
+    "presence_penalty": 0.0,
+    "mtp": True,
     "attn_implementation": "sdpa",
     "adapter": ADAPTER_REPO,
     "use_lora": True,
@@ -628,28 +629,21 @@ def _locate_adapter(
 
 
 def _gguf_text(settings: dict, **common) -> str:
-    """Generate through whichever GGUF runtime this installation has.
+    """Generate through the GGUF runtime the options ask for.
 
-    Both rewriters ask the same question -- resident wheel, or the official
-    binaries in a subprocess -- and the answer does not depend on which of them
-    is asking, so it is answered once.
+    'auto' and 'llama.cpp' both mean the official binaries -- a one-shot
+    ``llama-server``, which is also the only runtime here that runs a model's own
+    multi-token-prediction head. The wheel runs only when it is asked for by name.
     """
-    runtime = settings.get("gguf_runtime", RUNTIME_AUTO)
-    if runtime == RUNTIME_AUTO:
-        runtime = RUNTIME_WHEEL if gguf_engine.available() else RUNTIME_BINARY
-
-    if runtime == RUNTIME_WHEEL:
+    common.setdefault("presence_penalty", float(settings["presence_penalty"]))
+    if settings.get("gguf_runtime", RUNTIME_AUTO) == RUNTIME_WHEEL:
         if not gguf_engine.available():
-            raise RuntimeError(
-                f"gguf_runtime is set to '{RUNTIME_WHEEL}', but it is not importable "
-                f"here. Install it, or set gguf_runtime to '{RUNTIME_AUTO}' or "
-                f"'{RUNTIME_BINARY}' to run the official binaries instead.\n\n"
-                + gguf_engine.INSTALL_HINT
-            )
+            raise RuntimeError(gguf_engine.INSTALL_HINT)
         return gguf_engine.rewrite(**common)
-    return cli_engine.rewrite(
+    return server_engine.rewrite(
         backend=settings["llama_backend"],
         auto_download=settings["auto_download"],
+        mtp=bool(settings["mtp"]),
         **common,
     )
 
@@ -746,11 +740,11 @@ class MiniMaxH3RewriterOptions:
                     {
                         "default": RUNTIME_AUTO,
                         "tooltip": (
-                            "GGUF only: what runs the model. 'auto' uses llama-cpp-python when "
-                            "it is importable and the official llama.cpp binaries otherwise. "
-                            "Force 'llama.cpp' if an installed wheel is broken; force "
-                            "'llama-cpp-python' to keep the model resident between runs, which "
-                            "the binaries cannot do."
+                            "GGUF only: what runs the model. 'auto' and 'llama.cpp' run the "
+                            "official llama.cpp binaries (a one-shot llama-server), which also "
+                            "use a model's built-in multi-token-prediction head to generate "
+                            "faster. 'llama-cpp-python' uses the installed wheel instead: no "
+                            "MTP, but it can keep the model resident between runs."
                         ),
                     },
                 ),
@@ -763,7 +757,7 @@ class MiniMaxH3RewriterOptions:
                     {
                         "default": "auto",
                         "tooltip": (
-                            "GGUF only, and only when llama-cpp-python is absent: which official "
+                            "GGUF only, unless gguf_runtime is 'llama-cpp-python': which official "
                             "llama.cpp build to fetch. 'auto' takes CUDA on Windows with a "
                             "supported NVIDIA card (511 MB, about twice as fast) and Vulkan "
                             "otherwise. Pick 'vulkan' to keep the download at 34 MB."
@@ -779,6 +773,35 @@ class MiniMaxH3RewriterOptions:
                             "Transformers runs it when the model loads. Off means such a model "
                             "is refused rather than executed. Turn it on only for a model you "
                             "picked and trust — not because a downloaded workflow asked for it."
+                        ),
+                    },
+                ),
+                "presence_penalty": (
+                    "FLOAT",
+                    {
+                        "default": 0.0,
+                        "min": 0.0,
+                        "max": 2.0,
+                        "step": 0.05,
+                        "tooltip": (
+                            "GGUF only: penalises every token that has already appeared, once. "
+                            "Qwen recommends 1.5 for its non-thinking mode, and HauhauCS uses 1.5 "
+                            "with thinking on too, where it keeps the reasoning noticeably "
+                            "shorter. 0 turns it off."
+                        ),
+                    },
+                ),
+                "mtp": (
+                    "BOOLEAN",
+                    {
+                        "default": True,
+                        "tooltip": (
+                            "GGUF on the llama.cpp runtime only: when the model carries its own "
+                            "multi-token-prediction head (e.g. Qwen3.8 MTP builds), let it draft "
+                            "tokens for the full model to verify. The text is what the model "
+                            "would write anyway; on large models on a GPU it is much faster. "
+                            "Turn it off if the 'Done' line shows fewer tok/s with it than "
+                            "without -- on small models the drafting can cost more than it saves."
                         ),
                     },
                 ),
@@ -1092,23 +1115,7 @@ def _guided_text(
         repetition_penalty=float(settings["repetition_penalty"]),
     )
 
-    runtime = settings.get("gguf_runtime", RUNTIME_AUTO)
-    if runtime == RUNTIME_AUTO:
-        runtime = RUNTIME_WHEEL if gguf_engine.available() else RUNTIME_BINARY
-
-    if runtime == RUNTIME_WHEEL:
-        if not gguf_engine.available():
-            raise RuntimeError(
-                f"gguf_runtime is set to '{RUNTIME_WHEEL}', but it is not importable here. "
-                f"Install it, or set gguf_runtime to '{RUNTIME_AUTO}' or '{RUNTIME_BINARY}' to "
-                f"run the official binaries instead.\n\n" + gguf_engine.INSTALL_HINT
-            )
-        return gguf_engine.rewrite(**common)
-    return cli_engine.rewrite(
-        backend=settings["llama_backend"],
-        auto_download=settings["auto_download"],
-        **common,
-    )
+    return _gguf_text(settings, **common)
 
 
 def _report(progress: NodeProgress, text: str, sections: dict, names: tuple[str, ...]) -> None:

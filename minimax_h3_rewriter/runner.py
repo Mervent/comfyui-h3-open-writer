@@ -1,8 +1,9 @@
 """Running a llama.cpp executable once and reading its output as it arrives.
 
-Shared by every subprocess backend in the pack: the rewriter drives
-``llama-completion`` and the captioner drives ``llama-mtmd-cli``, but the part
-that matters is identical and is the part that is easy to get wrong.
+Shared by every subprocess backend in the pack: the captioner drives
+``llama-mtmd-cli`` through :func:`run`, and ``server_engine`` starts
+``llama-server`` through :func:`spawn` and reuses the same timers, because the
+part that matters is identical and is the part that is easy to get wrong.
 
 Four things are load-bearing:
 
@@ -125,6 +126,11 @@ def spawn(command: list[str], binary: str) -> subprocess.Popen:
     return process
 
 
+def forget(process: subprocess.Popen) -> None:
+    """Drop a process that has exited from the kill-on-exit registry."""
+    _LIVE.discard(process)
+
+
 def _pump(stream, sink: queue.Queue) -> None:
     try:
         while True:
@@ -221,7 +227,7 @@ def run(
         if was_interrupted or stalled or process.poll() is None:
             process.kill()
         process.wait()
-        _LIVE.discard(process)
+        forget(process)
 
     stderr_text = _drain(errors)
 
