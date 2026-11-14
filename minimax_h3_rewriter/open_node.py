@@ -103,6 +103,12 @@ Output contract:
   last: who moves where, what changes, and what the camera does to get there.
 - Compose the scene for the requested aspect ratio, and fit the number, timing and
   pacing of the shots to the requested duration.
+- When original_prompt gives timings, such as [1.5-4.0s], keep every one of them and
+  do not turn them into cuts. Stay in the current shot and open each timed beat with
+  its start time in the guide's MM:SS.mmm form, e.g. "At 00:01.500, she ...", in the
+  user's order. A beat is not a shot: no new [Shot N], no "cuts to" or transition
+  wording, and [Shot 1] itself still carries no timestamp. Pace each beat so it is
+  done by the end of its range. Cut only where the user explicitly asks for a cut.
 - Write everything in English. Dialogue and lyrics inside <d> and text visible on
   screen keep their original wording and punctuation.
 - Use N/A for a sound field only in the cases the guide allows it.

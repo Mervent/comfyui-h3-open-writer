@@ -21,6 +21,10 @@ Connect ``image`` and the same model looks at the pictures before it writes.
 That run goes through ``llama-mtmd-cli`` instead (see ``mtmd_engine.write``),
 so the model needs its projector (``mmproj``) in the same folder, and it is a
 fresh process each time: ``keep_model_loaded`` has no effect there.
+
+Set ``save_dir`` and every story the node returns is also written there as a
+plain ``.txt`` file named after a hash of its text, so the folder grows into a
+library that a prompt template can pick stories from later.
 """
 
 from __future__ import annotations
@@ -153,6 +157,38 @@ def _projector(model_path: str) -> str:
     return mmproj_path
 
 
+def _library_dir(save_dir: str) -> str:
+    """The folder to save stories into, created if missing.
+
+    A relative path sits under ComfyUI's output folder."""
+    directory = os.path.expanduser(save_dir.strip())
+    if not os.path.isabs(directory):
+        import folder_paths
+
+        directory = os.path.join(folder_paths.get_output_directory(), directory)
+    os.makedirs(directory, exist_ok=True)
+    return directory
+
+
+def _save_story(directory: str, story: str) -> None:
+    """Write the story as ``<hash>.txt``; the same story always lands in the same file."""
+    name = hashlib.sha256(story.encode("utf-8")).hexdigest()[:16] + ".txt"
+    destination = os.path.join(directory, name)
+    if os.path.exists(destination):
+        return
+    part = destination + ".part"
+    try:
+        with open(part, "w", encoding="utf-8") as handle:
+            handle.write(story + "\n")
+        os.replace(part, destination)
+    except OSError as error:
+        log.warning("[minimax_h3_rewriter.story_node] could not save '%s': %s", destination, error)
+        if os.path.exists(part):
+            os.remove(part)
+        return
+    log.info("[minimax_h3_rewriter.story_node] saved %s", destination)
+
+
 class MiniMaxH3StoryWriter:
     """Write a short, free-form story from a prompt, with model reasoning enabled."""
 
@@ -274,6 +310,18 @@ class MiniMaxH3StoryWriter:
                     },
                 ),
                 "options": (OPTIONS_TYPE,),
+                "save_dir": (
+                    "STRING",
+                    {
+                        "default": "",
+                        "tooltip": (
+                            "Folder to save every story into as a .txt file, building a library "
+                            "to reuse later. A relative path goes under ComfyUI's output folder. "
+                            "Files are named after the story's hash, so the same story is never "
+                            "saved twice. Empty saves nothing."
+                        ),
+                    },
+                ),
             },
             "hidden": {"unique_id": "UNIQUE_ID"},
         }
@@ -296,10 +344,12 @@ class MiniMaxH3StoryWriter:
         use_cache=True,
         image=None,
         options=None,
+        save_dir="",
         unique_id=None,
     ):
         if not (prompt or "").strip():
             raise ValueError("prompt must not be empty")
+        library = _library_dir(save_dir) if (save_dir or "").strip() else ""
 
         settings = dict(DEFAULT_OPTIONS)
         if options:
@@ -338,6 +388,8 @@ class MiniMaxH3StoryWriter:
                     force=True,
                 )
                 log.info("[minimax_h3_rewriter.story_node] cache hit %s", cache_key)
+                if library and story:
+                    _save_story(library, story)
                 return (story, thinking, cached)
 
         choice = _resolve_writer_choice(model)
@@ -432,6 +484,8 @@ class MiniMaxH3StoryWriter:
             )
         else:
             progress.text(story[-2000:] if story else "(empty story)", force=True)
+        if library and story:
+            _save_story(library, story)
         return (story, thinking, raw)
 
 
